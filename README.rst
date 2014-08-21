@@ -206,6 +206,15 @@ field. The currently supported configuration options are:
     present in the local CKAN. Setting it to 'create' will make an attempt to
     create the organizations by copying the details from the remote CKAN.
 
+*   blacklist_orgs: Do not harvest organisations for which the URL slug matches an entry in this list
+
+*   harvested_datasets: By default, harvested datasets are ignored. There are two alternatives.
+    Setting this property enables the harvester to import remote harvested datasets.
+
+*   harvested_dataset_whitelist: By default, harvested datasets are ignored. There are two alternatives.
+    Setting this property enables the harvester to import remote harvested datasets if the exact title that
+    the remote system specifies as the source of a harvested dataset matches one in this list.
+
 *   clean_tags: By default, tags are not stripped of accent characters, spaces and
     capital letters for display. If this option is set to True, accent characters
     will be replaced by their ascii equivalents, capital letters replaced by
