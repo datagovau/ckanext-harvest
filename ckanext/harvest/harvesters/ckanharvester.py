@@ -257,7 +257,7 @@ class CKANHarvester(HarvesterBase):
                 log.warn('Remote dataset has been harvested from another source and is not in whitelist of sources, ignoring...')
                 return True
 
-            if package_dict.get('organization') and package_dict.get('organization').name in self.config.get('orgs_blacklist', []):
+            if package_dict.get('organization') and package_dict.get('organization')['name'] in self.config.get('orgs_blacklist', []):
                 log.warn('Remote dataset organisation is in local organisation blacklist, ignoring...')
                 return True
 
