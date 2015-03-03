@@ -7,12 +7,13 @@ from ckan.logic import ValidationError, NotFound, get_action
 from ckan.lib.helpers import json
 from ckan.lib.munge import munge_name
 
+from ckan.lib import helpers
 from ckanext.harvest.model import HarvestJob, HarvestObject, HarvestGatherError, \
                                     HarvestObjectError
 
 import logging
 log = logging.getLogger(__name__)
-
+import re
 from base import HarvesterBase
 
 class CKANHarvester(HarvesterBase):
@@ -170,7 +171,7 @@ class CKANHarvester(HarvesterBase):
 
                 try:
                     content = self._get_content(url)
-
+		    log.info(url)
                     revision_ids = json.loads(content)
                     if len(revision_ids):
                         for revision_id in revision_ids:
@@ -270,6 +271,29 @@ class CKANHarvester(HarvesterBase):
             if package_dict.get('type') == 'harvest':
                 log.warn('Remote dataset is a harvest source, ignoring...')
                 return True
+	    log.info(package_dict['extras'])
+            if package_dict['extras'].get('harvest_portal'):
+                log.warn('Remote dataset is search partnership harvested, ignoring...')
+                return True
+
+            if package_dict.get('harvest_source_title') and not self.config.get('harvested_datasets', None) and not self.config.get('harvested_datasets_whitelist', None):
+                log.warn('Remote dataset has been harvested from another source, ignoring...')
+                return True
+
+            if package_dict.get('harvest_source_title') and package_dict.get('harvest_source_title') not in self.config.get('harvested_datasets_whitelist', []):
+                log.warn('Remote dataset has been harvested from another source and is not in whitelist of sources, ignoring...')
+                return True
+
+            if package_dict.get('organization') and package_dict.get('organization')['name'] in self.config.get('orgs_blacklist', []):
+                log.warn('Remote dataset organisation is in local organisation blacklist, ignoring...')
+                return True
+
+	    # adjust name if already exists
+            #try:
+            #    pkg = get_action('package_show')({'model':model,'user':c.user}, {'id': package_dict['name']})
+            #    package_dict['name'] =  package_dict['name'] = '-'+harvest_object.guid
+            #except NotFound, e:
+            #    log.info('Package name %s does not already exist' %  package_dict['name'])
 
             # Set default tags if needed
             default_tags = self.config.get('default_tags',[])
@@ -277,7 +301,17 @@ class CKANHarvester(HarvesterBase):
                 if not 'tags' in package_dict:
                     package_dict['tags'] = []
                 package_dict['tags'].extend([t for t in default_tags if t not in package_dict['tags']])
-
+	    def munge_tag(name):
+	        # convert separators
+                name = re.sub('[.:/-]', ' ', name)
+                # take out not-allowed characters
+                name = re.sub('[^a-zA-Z0-9-_]', ' ', name).lower()
+                # remove doubles
+                name = re.sub('  ', '-', name)
+                # remove leading or trailing hyphens
+                name = name.strip(' ')[:99]
+                return name
+	    package_dict['tags'] = [munge_tag(t) for t in package_dict['tags']]
             remote_groups = self.config.get('remote_groups', None)
             if not remote_groups in ('only_local', 'create'):
                 # Ignore remote groups

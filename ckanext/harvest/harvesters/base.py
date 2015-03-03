@@ -218,7 +218,10 @@ class HarvesterBase(SingletonPlugin):
                 model.Session.execute('SET CONSTRAINTS harvest_object_package_id_fkey DEFERRED')
                 model.Session.flush()
 
-                new_package = get_action('package_create_rest')(context, package_dict)
+                try:
+		    new_package = get_action('package_create_rest')(context, package_dict)
+		except Exception:
+		    package_dict['name'] = package_dict['name']+'-'+package_dict['id']
 
             Session.commit()
 
