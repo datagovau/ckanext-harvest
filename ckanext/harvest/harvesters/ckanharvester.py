@@ -249,7 +249,7 @@ class CKANHarvester(HarvesterBase):
                 log.warn('Remote dataset is a harvest source, ignoring...')
                 return True
 	    log.info(package_dict['extras'])
-            if package_dict['extras']['harvest_portal']:
+            if package_dict['extras'].get('harvest_portal'):
                 log.warn('Remote dataset is search partnership harvested, ignoring...')
                 return True
 
