@@ -11,7 +11,7 @@ from ckanext.harvest.model import HarvestJob, HarvestObject, HarvestGatherError,
 
 import logging
 log = logging.getLogger(__name__)
-
+import re
 from base import HarvesterBase
 
 class CKANHarvester(HarvesterBase):
@@ -249,7 +249,7 @@ class CKANHarvester(HarvesterBase):
                 log.warn('Remote dataset is a harvest source, ignoring...')
                 return True
 	    log.info(package_dict['extras'])
-            if package_dict['extras']['harvest_portal']:
+            if 'harvest_portal' in package_dict['extras']:
                 log.warn('Remote dataset is search partnership harvested, ignoring...')
                 return True
 
@@ -265,6 +265,12 @@ class CKANHarvester(HarvesterBase):
                 log.warn('Remote dataset organisation is in local organisation blacklist, ignoring...')
                 return True
 
+	    # adjust name if already exists
+            #try:
+            #    pkg = get_action('package_show')({'model':model,'user':c.user}, {'id': package_dict['name']})
+            #    package_dict['name'] =  package_dict['name'] = '-'+harvest_object.guid
+            #except NotFound, e:
+            #    log.info('Package name %s does not already exist' %  package_dict['name'])
 
             # Set default tags if needed
             default_tags = self.config.get('default_tags',[])
@@ -272,7 +278,17 @@ class CKANHarvester(HarvesterBase):
                 if not 'tags' in package_dict:
                     package_dict['tags'] = []
                 package_dict['tags'].extend([t for t in default_tags if t not in package_dict['tags']])
-
+	    def munge_tag(name):
+	        # convert separators
+                name = re.sub('[.:/-]', ' ', name)
+                # take out not-allowed characters
+                name = re.sub('[^a-zA-Z0-9-_]', ' ', name).lower()
+                # remove doubles
+                name = re.sub('  ', '-', name)
+                # remove leading or trailing hyphens
+                name = name.strip(' ')[:99]
+                return name
+	    package_dict['tags'] = [munge_tag(t) for t in package_dict['tags']]
             remote_groups = self.config.get('remote_groups', None)
             if not remote_groups in ('only_local', 'create'):
                 # Ignore remote groups
