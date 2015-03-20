@@ -9,6 +9,7 @@ import ckan.plugins as p
 from ckan.lib.plugins import DefaultDatasetForm
 from ckan.lib.navl import dictization_functions
 
+import ckan.lib.mailer as mailer
 from ckanext.harvest import logic as harvest_logic
 
 from ckanext.harvest.model import setup as model_setup
@@ -38,6 +39,9 @@ class Harvest(p.SingletonPlugin, DefaultDatasetForm):
 
     def after_create(self, context, data_dict):
         if 'type' in data_dict and data_dict['type'] == DATASET_TYPE_NAME and not self.startup:
+            # send an email to data.gov
+            msg = "User "+ context['user'] +" has created a harvester called " + data_dict['title'] +"\n Please check this harvester on https://data.gov.au/harvest and pick a update frequency to begin harvesting"
+            mailer.mail_recipient('Data.gov.au Admin', 'root@asadleir-desktop', 'Harvester request: '+data_dict['title'], msg)
             # Create an actual HarvestSource object
             _create_harvest_source_object(context, data_dict)
 

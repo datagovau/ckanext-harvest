@@ -14,10 +14,13 @@ Example:
   {% snippet 'snippets/sources_list.html', sources=c.sources %}
 
 #}
-{% if sources %}
+{% set authorized_user = h.check_access('harvest_source_create') %}
+
+{% if authorized_user and sources %}
   <ul class="{{ list_class or 'dataset-list unstyled' }}">
     {% for source in sources %}
       {% snippet 'snippets/source_item.html', source=source, item_class=item_class, hide_resources=hide_resources, banner=banner, truncate=truncate, truncate_title=truncate_title, within_organization=within_organization %}
     {% endfor %}
   </ul>
+
 {% endif %}
