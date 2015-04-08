@@ -5,7 +5,7 @@ from ckan import model
 from ckan.model import Session, Package
 from ckan.logic import ValidationError, NotFound, get_action
 from ckan.lib.helpers import json
-
+from ckan.lib import helpers
 from ckanext.harvest.model import HarvestJob, HarvestObject, HarvestGatherError, \
                                     HarvestObjectError
 
@@ -148,7 +148,7 @@ class CKANHarvester(HarvesterBase):
 
                 try:
                     content = self._get_content(url)
-
+		    log.info(url)
                     revision_ids = json.loads(content)
                     if len(revision_ids):
                         for revision_id in revision_ids:
@@ -247,6 +247,10 @@ class CKANHarvester(HarvesterBase):
 
             if package_dict.get('type') == 'harvest':
                 log.warn('Remote dataset is a harvest source, ignoring...')
+                return True
+            log.info(package_dict['extras'])
+            if package_dict['extras'].get('harvest_portal') or package_dict.get('harvest_portal'):
+                log.warn('Remote dataset is search partnership harvested, ignoring...')
                 return True
 
             if package_dict.get('harvest_source_title') and not self.config.get('harvested_datasets', None) and not self.config.get('harvested_datasets_whitelist', None):
