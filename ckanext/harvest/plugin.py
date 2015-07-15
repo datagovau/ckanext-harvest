@@ -41,7 +41,8 @@ class Harvest(p.SingletonPlugin, DefaultDatasetForm):
         if 'type' in data_dict and data_dict['type'] == DATASET_TYPE_NAME and not self.startup:
             # send an email to data.gov
             msg = "User "+ context['user'] +" has created a harvester called " + data_dict['title'] +"\n Please check this harvester on https://data.gov.au/harvest and pick a update frequency to begin harvesting"
-            mailer.mail_recipient('Data.gov.au Admin', 'root@asadleir-desktop', 'Harvester request: '+data_dict['title'], msg)
+            mailer.mail_recipient('Data.gov.au Admin', 'data.gov@finance.gov.au', 'Harvester request: '+data_dict['title'], msg)
+            mailer.mail_recipient('Data.gov.au Admin', 'alex.sadleir@linkdigital.com.au', 'Harvester request: '+data_dict['title'], msg)
             # Create an actual HarvestSource object
             _create_harvest_source_object(context, data_dict)
 
