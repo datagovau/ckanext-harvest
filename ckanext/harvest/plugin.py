@@ -7,6 +7,12 @@ from ckan import logic
 from ckan import model
 import ckan.plugins as p
 from ckan.lib.plugins import DefaultDatasetForm
+try:
+    from ckan.lib.plugins import DefaultTranslation
+except ImportError:
+    class DefaultTranslation():
+        pass
+
 from ckan.lib.navl import dictization_functions
 
 from ckanext.harvest import logic as harvest_logic
@@ -15,12 +21,14 @@ from ckanext.harvest.model import setup as model_setup
 from ckanext.harvest.model import HarvestSource, HarvestJob, HarvestObject
 
 
+
 log = getLogger(__name__)
 assert not log.disabled
 
 DATASET_TYPE_NAME = 'harvest'
 
-class Harvest(p.SingletonPlugin, DefaultDatasetForm):
+
+class Harvest(p.SingletonPlugin, DefaultDatasetForm, DefaultTranslation):
 
     p.implements(p.IConfigurable)
     p.implements(p.IRoutes, inherit=True)
@@ -31,6 +39,9 @@ class Harvest(p.SingletonPlugin, DefaultDatasetForm):
     p.implements(p.IPackageController, inherit=True)
     p.implements(p.ITemplateHelpers)
     p.implements(p.IFacets, inherit=True)
+    if p.toolkit.check_ckan_version(min_version='2.5.0'):
+        p.implements(p.ITranslation, inherit=True)
+
 
     startup = False
 
@@ -287,13 +298,10 @@ def _add_extra(data_dict, key, value):
 
 def _get_logic_functions(module_root, logic_functions = {}):
 
-    for module_name in ['get', 'create', 'update','delete']:
+    for module_name in ['get', 'create', 'update', 'patch', 'delete']:
         module_path = '%s.%s' % (module_root, module_name,)
-        try:
-            module = __import__(module_path)
-        except ImportError:
-            log.debug('No auth module for action "{0}"'.format(module_name))
-            continue
+
+        module = __import__(module_path)
 
         for part in module_path.split('.')[1:]:
             module = getattr(module, part)
