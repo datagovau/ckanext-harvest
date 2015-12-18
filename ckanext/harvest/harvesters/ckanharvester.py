@@ -305,7 +305,7 @@ class CKANHarvester(HarvesterBase):
 
         try:
             log.debug('Loading JSON...')
-            package_dict = json.loads(harvest_object.content.decode('string_escape'))
+            package_dict = json.loads(harvest_object.content, strict=False)
             log.debug('JSON loaded!')
 
             if package_dict.get('type') == 'harvest':
