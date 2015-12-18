@@ -304,9 +304,7 @@ class CKANHarvester(HarvesterBase):
         self._set_config(harvest_object.job.source.config)
 
         try:
-            log.debug('Loading JSON...')
-            package_dict = json.loads(harvest_object.content.replace(r"\\", "\\"))
-            log.debug('JSON loaded!')
+            package_dict = json.loads(harvest_object.content)
 
             if package_dict.get('type') == 'harvest':
                 log.warn('Remote dataset is a harvest source, ignoring...')
