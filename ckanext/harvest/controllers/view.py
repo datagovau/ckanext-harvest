@@ -1,6 +1,13 @@
 import re
-from lxml import etree
-from lxml.etree import XMLSyntaxError
+import xml.etree.ElementTree as etree
+try:
+    # Python 2.7
+    xml_parser_exception = etree.ParseError
+except AttributeError:
+    # Python 2.6
+    from xml.parsers import expat
+    xml_parser_exception = expat.ExpatError
+
 from pylons.i18n import _
 
 from ckan import model
@@ -8,8 +15,9 @@ from ckan import model
 import ckan.plugins as p
 import ckan.lib.helpers as h, json
 from ckan.lib.base import BaseController, c, \
-                          response, render, abort, redirect
+                          request, response, render, abort, redirect
 
+from ckanext.harvest.logic import HarvestJobExists, HarvestSourceInactiveError
 from ckanext.harvest.plugin import DATASET_TYPE_NAME
 
 import logging
@@ -28,9 +36,15 @@ class ViewController(BaseController):
     def delete(self,id):
         try:
             context = {'model':model, 'user':c.user}
+
+            context['clear_source'] = request.params.get('clear', '').lower() in (u'true', u'1')
+
             p.toolkit.get_action('harvest_source_delete')(context, {'id':id})
 
-            h.flash_success(_('Harvesting source successfully inactivated'))
+            if context['clear_source']:
+                h.flash_success(_('Harvesting source successfully cleared'))
+            else:
+                h.flash_success(_('Harvesting source successfully inactivated'))
 
             redirect(h.url_for('{0}_admin'.format(DATASET_TYPE_NAME), id=id))
         except p.toolkit.ObjectNotFound:
@@ -42,29 +56,49 @@ class ViewController(BaseController):
     def refresh(self, id):
         try:
             context = {'model':model, 'user':c.user, 'session':model.Session}
-            p.toolkit.get_action('harvest_job_create')(context,{'source_id':id})
-            h.flash_success(_('Refresh requested, harvesting will take place within 15 minutes.'))
+            p.toolkit.get_action('harvest_job_create')(
+                context, {'source_id': id, 'run': True})
+            h.flash_success(_('Harvest will start shortly. Refresh this page for updates.'))
         except p.toolkit.ObjectNotFound:
             abort(404,_('Harvest source not found'))
         except p.toolkit.NotAuthorized:
             abort(401,self.not_auth_message)
+        except HarvestSourceInactiveError, e:
+            h.flash_error(_('Cannot create new harvest jobs on inactive '
+                            'sources. First, please change the source status '
+                            'to \'active\'.'))
+        except HarvestJobExists, e:
+            h.flash_notice(_('A harvest job has already been scheduled for '
+                             'this source'))
         except Exception, e:
-            if 'Can not create jobs on inactive sources' in str(e):
-                h.flash_error(_('Cannot create new harvest jobs on inactive sources.'
-                                 + ' First, please change the source status to \'active\'.'))
-            elif 'There already is an unrun job for this source' in str(e):
-                h.flash_notice(_('A harvest job has already been scheduled for this source'))
-            else:
                 msg = 'An error occurred: [%s]' % str(e)
                 h.flash_error(msg)
 
         redirect(h.url_for('{0}_admin'.format(DATASET_TYPE_NAME), id=id))
 
-    def show_object(self,id):
+    def clear(self, id):
+        try:
+            context = {'model':model, 'user':c.user, 'session':model.Session}
+            p.toolkit.get_action('harvest_source_clear')(context,{'id':id})
+            h.flash_success(_('Harvest source cleared'))
+        except p.toolkit.ObjectNotFound:
+            abort(404,_('Harvest source not found'))
+        except p.toolkit.NotAuthorized:
+            abort(401,self.not_auth_message)
+        except Exception, e:
+            msg = 'An error occurred: [%s]' % str(e)
+            h.flash_error(msg)
+
+        redirect(h.url_for('{0}_admin'.format(DATASET_TYPE_NAME), id=id))
+
+    def show_object(self, id, ref_type='object'):
 
         try:
             context = {'model':model, 'user':c.user}
-            obj = p.toolkit.get_action('harvest_object_show')(context, {'id':id})
+            if ref_type == 'object':
+                obj = p.toolkit.get_action('harvest_object_show')(context, {'id': id})
+            elif ref_type == 'dataset':
+                obj = p.toolkit.get_action('harvest_object_show')(context, {'dataset_id': id})
 
             # Check content type. It will probably be either XML or JSON
             try:
@@ -75,13 +109,15 @@ class ViewController(BaseController):
                     content = obj['extras']['original_document']
                 else:
                     abort(404,_('No content found'))
-
-                etree.fromstring(re.sub('<\?xml(.*)\?>','',content))
+                try:
+                    etree.fromstring(re.sub('<\?xml(.*)\?>','',content))
+                except UnicodeEncodeError:
+                    etree.fromstring(re.sub('<\?xml(.*)\?>','',content.encode('utf-8')))
                 response.content_type = 'application/xml; charset=utf-8'
                 if not '<?xml' in content.split('\n')[0]:
                     content = u'<?xml version="1.0" encoding="UTF-8"?>\n' + content
 
-            except XMLSyntaxError:
+            except xml_parser_exception:
                 try:
                     json.loads(obj['content'])
                     response.content_type = 'application/json; charset=utf-8'
@@ -91,8 +127,8 @@ class ViewController(BaseController):
 
             response.headers['Content-Length'] = len(content)
             return content.encode('utf-8')
-        except p.toolkit.ObjectNotFound:
-            abort(404,_('Harvest object not found'))
+        except p.toolkit.ObjectNotFound, e:
+            abort(404,_(str(e)))
         except p.toolkit.NotAuthorized:
             abort(401,self.not_auth_message)
         except Exception, e:

@@ -2,30 +2,83 @@
 ckanext-harvest - Remote harvesting extension
 =============================================
 
+.. image:: https://travis-ci.org/ckan/ckanext-harvest.svg?branch=master
+    :target: https://travis-ci.org/ckan/ckanext-harvest
+
 This extension provides a common harvesting framework for ckan extensions
 and adds a CLI and a WUI to CKAN to manage harvesting sources and jobs.
 
 Installation
 ============
 
-The harvest extension uses Message Queuing to handle the different gather
-stages.
+1. The harvest extension can use two different backends. You can choose whichever
+   you prefer depending on your needs, but Redis has been found to be more stable
+   and reliable so it is the recommended one:
 
-You will need to install the RabbitMQ server::
+   * `Redis <http://redis.io/>`_ (recommended): To install it, run::
 
-    sudo apt-get install rabbitmq-server
+      sudo apt-get install redis-server
 
-Clone the repository and set up the extension::
+     On your CKAN configuration file, add::
 
-    git clone https://github.com/okfn/ckanext-harvest
-    cd ckanext-harvest
-    pip install -r pip-requirements.txt
-    python setup.py develop
+      ckan.harvest.mq.type = redis
 
-Make sure the CKAN configuration ini file contains the harvest main plugin, as
-well as the harvester for CKAN instances (included with the extension)::
+   * `RabbitMQ <http://www.rabbitmq.com/>`_: To install it, run::
 
-    ckan.plugins = harvest ckan_harvester
+      sudo apt-get install rabbitmq-server
+
+     On your CKAN configuration file, add::
+
+      ckan.harvest.mq.type = amqp
+
+2. Activate your CKAN virtual environment, for example::
+
+     $ . /usr/lib/ckan/default/bin/activate
+
+3. Install the ckanext-harvest Python package into your virtual environment::
+
+     (pyenv) $ pip install -e git+https://github.com/ckan/ckanext-harvest.git#egg=ckanext-harvest
+
+4. Install the python modules required by the extension::
+
+     (pyenv) $ pip install -r pip-requirements.txt
+
+5. Make sure the CKAN configuration ini file contains the harvest main plugin, as
+   well as the harvester for CKAN instances if you need it (included with the extension)::
+
+     ckan.plugins = harvest ckan_harvester
+
+6. If you haven't done it yet on the previous step, define the backend that you
+   are using with the ``ckan.harvest.mq.type`` option (it defaults to ``amqp``)::
+
+     ckan.harvest.mq.type = redis
+
+There are a number of configuration options available for the backends. These don't need to
+be modified at all if you are using the default Redis or RabbitMQ install (step 1). The list
+below shows the available options and their default values:
+
+    * Redis:
+        - ``ckan.harvest.mq.hostname`` (localhost)
+        - ``ckan.harvest.mq.port`` (6379)
+        - ``ckan.harvest.mq.redis_db`` (0)
+
+    * RabbitMQ:
+        - ``ckan.harvest.mq.user_id`` (guest)
+        - ``ckan.harvest.mq.password`` (guest)
+        - ``ckan.harvest.mq.hostname`` (localhost)
+        - ``ckan.harvest.mq.port`` (5672)
+        - ``ckan.harvest.mq.virtual_host`` (/)
+
+
+**Note**: it is safe to use the same backend server (either Redis or RabbitMQ)
+for different CKAN instances, as long as they have different site ids. The ``ckan.site_id``
+config option (or ``default``) will be used to namespace the relevant things:
+
+* On RabbitMQ it will be used to name the queues used, eg ``ckan.harvest.site1.gather`` and
+  ``ckan.harvest.site1.fetch``.
+
+* On Redis, it will namespace the keys used, so only the relevant instance gets them, eg
+  ``site1:harvest_job_id``,  ``site1:harvest_object__id:804f114a-8f68-4e7c-b124-3eb00f66202f``
 
 
 Configuration
@@ -35,15 +88,13 @@ Run the following command to create the necessary tables in the database::
 
     paster --plugin=ckanext-harvest harvester initdb --config=mysite.ini
 
-The extension needs a user with sysadmin privileges to perform the
-harvesting jobs. You can create such a user running this command::
+Finally, restart CKAN to have the changes take affect:
 
-    paster --plugin=ckan sysadmin add harvest
+    sudo service apache2 restart
 
-After installation, the harvest interface should be available under /harvest
-if you're logged in with sysadmin permissions, eg.
+After installation, the harvest source listing should be available under /harvest, eg:
 
-	http://localhost:5000/harvest
+    http://localhost:5000/harvest
 
 
 Command line interface
@@ -55,24 +106,47 @@ The following operations can be run from the command line using the
       harvester initdb
         - Creates the necessary tables in the database
 
-      harvester source {url} {type} [{active}] [{user-id}] [{publisher-id}]
+      harvester source {name} {url} {type} [{title}] [{active}] [{owner_org}] [{frequency}] [{config}]
         - create new harvest source
 
-      harvester rmsource {id}
-        - remove (inactivate) a harvester source
+      harvester source {source-id/name}
+        - shows a harvest source
+
+      harvester rmsource {source-id/name}
+        - remove (deactivate) a harvester source, whilst leaving any related
+          datasets, jobs and objects
+
+      harvester clearsource {source-id/name}
+        - clears all datasets, jobs and objects related to a harvest source,
+          but keeps the source itself
 
       harvester sources [all]
         - lists harvest sources
           If 'all' is defined, it also shows the Inactive sources
 
-      harvester job {source-id}
+      harvester job {source-id/name}
         - create new harvest job
 
       harvester jobs
         - lists harvest jobs
 
+      harvester job_abort {source-id/name}
+        - marks a job as "Aborted" so that the source can be restarted afresh.
+          It ensures that the job's harvest objects status are also marked
+          finished. You should ensure that neither the job nor its objects are
+          currently in the gather/fetch queues.
+
       harvester run
-        - runs harvest jobs
+        - starts any harvest jobs that have been created by putting them onto
+          the gather queue. Also checks running jobs - if finished it
+          changes their status to Finished.
+
+      harvester run_test {source-id/name}
+        - runs a harvest - for testing only.
+          This does all the stages of the harvest (creates job, gather, fetch,
+          import) without involving the web UI or the queue backends. This is
+          useful for testing a harvester without having to fire up
+          gather/fetch_consumer processes, as is done in production.
 
       harvester gather_consumer
         - starts the consumer for the gathering queue
@@ -80,15 +154,33 @@ The following operations can be run from the command line using the
       harvester fetch_consumer
         - starts the consumer for the fetching queue
 
-      harvester import [{source-id}]
-        - perform the import stage with the last fetched objects, optionally
-          belonging to a certain source.
-          Please note that no objects will be fetched from the remote server.
-          It will only affect the last fetched objects already present in the
-          database.
+      harvester purge_queues
+        - removes all jobs from fetch and gather queue
+          WARNING: if using Redis, this command purges all data in the current
+          Redis database
+
+      harvester [-j] [-o] [--segments={segments}] import [{source-id}]
+        - perform the import stage with the last fetched objects, for a certain
+          source or a single harvest object. Please note that no objects will
+          be fetched from the remote server. It will only affect the objects
+          already present in the database.
+
+          To import a particular harvest source, specify its id as an argument.
+          To import a particular harvest object use the -o option.
+          To import a particular package use the -p option.
+
+          You will need to specify the -j flag in cases where the datasets are
+          not yet created (e.g. first harvest, or all previous harvests have
+          failed)
+
+          The --segments flag allows to define a string containing hex digits that represent which of
+          the 16 harvest object segments to import. e.g. 15af will run segments 1,5,a,f
 
       harvester job-all
         - create new harvest jobs for all active sources.
+
+      harvester reindex
+        - reindexes the harvest source datasets
 
 The commands should be run with the pyenv activated and refer to your sites configuration file (mysite.ini in this example)::
 
@@ -97,8 +189,15 @@ The commands should be run with the pyenv activated and refer to your sites conf
 Authorization
 =============
 
-TODO
+Starting from CKAN 2.0, harvest sources behave exactly the same as datasets
+(they are actually internally implemented as a dataset type). That means they
+can be searched and faceted, and that the same authorization rules can be
+applied to them. The default authorization settings are based on organizations
+(equivalent to the `publisher profile` found in old versions).
 
+Have a look at the `Authorization <http://docs.ckan.org/en/latest/authorization.html>`_
+documentation on CKAN core to see how to configure your instance depending on
+your needs.
 
 The CKAN harvester
 ===================
@@ -114,8 +213,8 @@ The CKAN harvesters support a number of configuration options to control their
 behaviour. Those need to be defined as a JSON object in the configuration form
 field. The currently supported configuration options are:
 
-*   api_version: You can force the harvester to use either version '1' or '2' of
-    the CKAN API. Default is '2'.
+*   api_version: You can force the harvester to use either version 1 or 2 of
+    the CKAN API. Default is 2.
 
 *   default_tags: A list of tags that will be added to all harvested datasets.
     Tags don't need to previously exist.
@@ -123,7 +222,7 @@ field. The currently supported configuration options are:
 *   default_groups: A list of groups to which the harvested datasets will be
     added to. The groups must exist. Note that you must use ids or names to
     define the groups according to the API version you defined (names for version
-    '1', ids for version '2').
+    1, ids for version 2).
 
 *   default_extras: A dictionary of key value pairs that will be added to extras
     of the harvested datasets. You can use the following replacement strings,
@@ -157,18 +256,65 @@ field. The currently supported configuration options are:
     Setting this property to true will force the harvester to gather all remote
     packages regardless of the modification date. Default is False.
 
+*   remote_groups: By default, remote groups are ignored. Setting this property
+    enables the harvester to import the remote groups. There are two alternatives.
+    Setting it to 'only_local' will just import groups which name/id is already
+    present in the local CKAN. Setting it to 'create' will make an attempt to
+    create the groups by copying the details from the remote CKAN.
+
+*   remote_orgs: By default, remote organizations are ignored. Setting this property
+    enables the harvester to import remote organizations. There are two alternatives.
+    Setting it to 'only_local' will just import organizations which id is already
+    present in the local CKAN. Setting it to 'create' will make an attempt to
+    create the organizations by copying the details from the remote CKAN.
+
+*   blacklist_orgs: Do not harvest organisations for which the URL slug matches an entry in this list
+
+*   harvested_datasets: By default, harvested datasets are ignored. There are two alternatives.
+    Setting this property enables the harvester to import remote harvested datasets.
+
+*   harvested_dataset_whitelist: By default, harvested datasets are ignored. There are two alternatives.
+    Setting this property enables the harvester to import remote harvested datasets if the exact title that
+    the remote system specifies as the source of a harvested dataset matches one in this list.
+
+*   clean_tags: By default, tags are not stripped of accent characters, spaces and
+    capital letters for display. If this option is set to True, accent characters
+    will be replaced by their ascii equivalents, capital letters replaced by
+    lower-case ones, and spaces replaced with dashes. Setting this option to False
+    gives the same effect as leaving it unset.
+
+*   organizations_filter_include: This configuration option allows you to specify
+    a list of remote organization names (e.g. "arkansas-gov" is the name for
+    organization http://catalog.data.gov/organization/arkansas-gov ). If this
+    property has a value then only datasets that are in one of these organizations
+    will be harvested. All other datasets will be skipped. Only one of
+    organizations_filter_include or organizations_filter_exclude should be
+    configured.
+
+*   organizations_filter_exclude: This configuration option allows you to specify
+    a list of remote organization names (e.g. "arkansas-gov" is the name for
+    organization http://catalog.data.gov/organization/arkansas-gov ). If this
+    property is set then all datasets from the remote source will be harvested
+    unless it belongs to one of the organizations in this option. Only one of
+    organizations_filter_exclude or organizations_filter_include should be
+    configured.
+
 Here is an example of a configuration object (the one that must be entered in
 the configuration field)::
 
     {
-     "api_version":"1",
+     "api_version": 1,
      "default_tags":["new-tag-1","new-tag-2"],
      "default_groups":["my-own-group"],
      "default_extras":{"new_extra":"Test","harvest_url":"{harvest_source_url}/dataset/{dataset_id}"},
      "override_extras": true,
+     "organizations_filter_include": [],
+     "organizations_filter_exclude": ["remote-organization"],
      "user":"harverster-user",
      "api_key":"<REMOTE_API_KEY>",
-     "read_only": true
+     "read_only": true,
+     "remote_groups": "only_local",
+     "remote_orgs": "create"
     }
 
 
@@ -202,11 +348,10 @@ following methods::
     '''
     implements(IHarvester)
 
-
     def info(self):
         '''
-        Harvesting implementations must provide this method, which will return a
-        dictionary containing different descriptors of the harvester. The
+        Harvesting implementations must provide this method, which will return
+        a dictionary containing different descriptors of the harvester. The
         returned dictionary should contain:
 
         * name: machine-readable name. This will be the value stored in the
@@ -214,8 +359,8 @@ following methods::
           harvester.
         * title: human-readable name. This will appear in the form's select box
           in the WUI.
-        * description: a small description of what the harvester does. This will
-          appear on the form as a guidance to the user.
+        * description: a small description of what the harvester does. This
+          will appear on the form as a guidance to the user.
 
         A complete example may be::
 
@@ -234,9 +379,10 @@ following methods::
 
         [optional]
 
-        Harvesters can provide this method to validate the configuration entered in the
-        form. It should return a single string, which will be stored in the database.
-        Exceptions raised will be shown in the form's error messages.
+        Harvesters can provide this method to validate the configuration
+        entered in the form. It should return a single string, which will be
+        stored in the database.  Exceptions raised will be shown in the form's
+        error messages.
 
         :param harvest_object_id: Config string coming from the form
         :returns: A string with the validated configuration options
@@ -267,7 +413,7 @@ following methods::
 
     def gather_stage(self, harvest_job):
         '''
-        The gather stage will recieve a HarvestJob object and will be
+        The gather stage will receive a HarvestJob object and will be
         responsible for:
             - gathering all the necessary objects to fetch on a later.
               stage (e.g. for a CSW server, perform a GetRecords request)
@@ -279,6 +425,8 @@ following methods::
             - creating and storing any suitable HarvestGatherErrors that may
               occur.
             - returning a list with all the ids of the created HarvestObjects.
+            - to abort the harvest, create a HarvestGatherError and raise an
+              exception. Any created HarvestObjects will be deleted.
 
         :param harvest_job: HarvestJob object
         :returns: A list of HarvestObject ids
@@ -293,27 +441,41 @@ following methods::
             - saving the content in the provided HarvestObject.
             - creating and storing any suitable HarvestObjectErrors that may
               occur.
-            - returning True if everything went as expected, False otherwise.
+            - returning True if everything is ok (ie the object should now be
+              imported), "unchanged" if the object didn't need harvesting after
+              all (ie no error, but don't continue to import stage) or False if
+              there were errors.
 
         :param harvest_object: HarvestObject object
-        :returns: True if everything went right, False if errors were found
+        :returns: True if successful, 'unchanged' if nothing to import after
+                  all, False if not successful
         '''
 
     def import_stage(self, harvest_object):
         '''
         The import stage will receive a HarvestObject object and will be
         responsible for:
-            - performing any necessary action with the fetched object (e.g
-              create a CKAN package).
+            - performing any necessary action with the fetched object (e.g.
+              create, update or delete a CKAN package).
               Note: if this stage creates or updates a package, a reference
               to the package should be added to the HarvestObject.
-            - creating the HarvestObject - Package relation (if necessary)
+            - setting the HarvestObject.package (if there is one)
+            - setting the HarvestObject.current for this harvest:
+               - True if successfully created/updated
+               - False if successfully deleted
+            - setting HarvestObject.current to False for previous harvest
+              objects of this harvest source if the action was successful.
             - creating and storing any suitable HarvestObjectErrors that may
               occur.
-            - returning True if everything went as expected, False otherwise.
+            - creating the HarvestObject - Package relation (if necessary)
+            - returning True if the action was done, "unchanged" if the object
+              didn't need harvesting after all or False if there were errors.
+
+        NB You can run this stage repeatedly using 'paster harvest import'.
 
         :param harvest_object: HarvestObject object
-        :returns: True if everything went right, False if errors were found
+        :returns: True if the action was done, "unchanged" if the object didn't
+                  need harvesting after all or False if there were errors.
         '''
 
 
@@ -324,17 +486,46 @@ interface:
 
 Here you can also find other examples of custom harvesters:
 
-* https://github.com/okfn/ckanext-pdeu/tree/master/ckanext/pdeu/harvesters
-* https://github.com/okfn/ckanext-inspire/ckanext/inspire/harvesters.py
-
+* https://github.com/ckan/ckanext-dcat/tree/master/ckanext/dcat/harvesters
+* https://github.com/ckan/ckanext-spatial/tree/master/ckanext/spatial/harvesters
 
 Running the harvest jobs
 ========================
 
-The harvesting extension uses two different queues, one that handles the
-gathering and another one that handles the fetching and importing. To start
-the consumers run the following command
-(make sure you have your python environment activated)::
+There are two ways to run a harvest::
+
+    1. ``harvester run_test`` for the command-line, suitable for testing
+    2. ``harvester run`` used by the Web UI and scheduled runs
+
+harvester run_test
+------------------
+
+You can run a harvester simply using the ``run_test`` command. This is handy
+for running a harvest with one command in the console and see all the output
+in-line. It runs the gather, fetch and import stages all in the same process.
+
+This is useful for developing a harvester because you can insert break-points
+in your harvester, and rerun a harvest without having to restart the
+gather_consumer and fetch_consumer processes each time. In addition, because it
+doesn't use the queue backends it doesn't interfere with harvests of other
+sources that may be going on in the background.
+
+However running this way, if gather_stage, fetch_stage or import_stage raise an
+exception, they are not caught, whereas with ``harvester run`` they are handled
+slightly differently as they are called by queue.py. So when testing this
+aspect its best to use ``harvester run``.
+
+harvester run
+-------------
+
+When a harvest job is started by a user in the Web UI, or by a scheduled
+harvest, the harvest is started by the ``harvester run`` command. This is the
+normal method in production systems and scales well.
+
+In this case, the harvesting extension uses two different queues: one that
+handles the gathering and another one that handles the fetching and importing.
+To start the consumers run the following command (make sure you have your
+python environment activated)::
 
       paster --plugin=ckanext-harvest harvester gather_consumer --config=mysite.ini
 
@@ -347,11 +538,22 @@ pending harvesting jobs::
 
       paster --plugin=ckanext-harvest harvester run --config=mysite.ini
 
-Note: If you don't have the `synchronous_search` plugin loaded, you will need
-to update the search index after the harvesting in order for the packages to
-appear in search results::
+The ``run`` command not only starts any pending harvesting jobs, but also
+flags those that are finished, allowing new jobs to be created on that particular
+source and refreshing the source statistics. That means that you will need to run
+this command before being able to create a new job on a source that was being
+harvested. (On a production site you will typically have a cron job that runs the
+command regularly, see next section).
 
-      paster --plugin=ckan search-index rebuild
+Occasionally you can find a harvesting job is in a "limbo state" where the job
+has run with errors but the ``harvester run`` command will not mark it as
+finished, and therefore you cannot run another job. This is due to particular
+harvester not handling errors correctly e.g. during development. In this
+circumstance, ensure that the gather & fetch consumers are running and have
+nothing more to consume, and then run this abort command with the name or id of
+the harvest source::
+
+      paster --plugin=ckanext-harvest harvester job_abort {source-id/name} --config=mysite.ini
 
 
 Setting up the harvesters on a production server
@@ -371,7 +573,7 @@ have already installed and configured the harvesting extension (See
 `Installation` if not).
 
 Note: It is recommended to run the harvest process from a non-root user
-(generally the one you are running CKAN with). Replace the user `okfn` in the
+(generally the one you are running CKAN with). Replace the user `ckan` in the
 following steps with the one you are using.
 
 1. Install Supervisor::
@@ -399,10 +601,10 @@ following steps with the one you are using.
 
         [program:ckan_gather_consumer]
 
-        command=/var/lib/ckan/std/pyenv/bin/paster --plugin=ckanext-harvest harvester gather_consumer --config=/etc/ckan/std/std.ini
+        command=/usr/lib//ckan/default/bin/paster --plugin=ckanext-harvest harvester gather_consumer --config=/etc/ckan/std/std.ini
 
         ; user that owns virtual environment.
-        user=okfn
+        user=ckan
 
         numprocs=1
         stdout_logfile=/var/log/ckan/std/gather_consumer.log
@@ -413,10 +615,10 @@ following steps with the one you are using.
 
         [program:ckan_fetch_consumer]
 
-        command=/var/lib/ckan/std/pyenv/bin/paster --plugin=ckanext-harvest harvester fetch_consumer --config=/etc/ckan/std/std.ini
+        command=/usr/lib//ckan/default/bin/paster --plugin=ckanext-harvest harvester fetch_consumer --config=/etc/ckan/std/std.ini
 
         ; user that owns virtual environment.
-        user=okfn
+        user=ckan
 
         numprocs=1
         stdout_logfile=/var/log/ckan/std/fetch_consumer.log
@@ -479,20 +681,43 @@ following steps with the one you are using.
    that will run the `run` harvester command periodically. To do so, edit the cron table with
    the following command (it may ask you to choose an editor)::
 
-    sudo crontab -e -u okfn
+    sudo crontab -e -u ckan
 
    Note that we are running this command as the same user we configured the processes to be run with
-   (`okfn` in our example).
+   (`ckan` in our example).
 
    Paste this line into your crontab, again replacing the paths to paster and the ini file with yours::
 
     # m  h  dom mon dow   command
-    */15 *  *   *   *     /var/lib/ckan/std/pyenv/bin/paster --plugin=ckanext-harvest harvester run --config=/etc/ckan/std/std.ini
+    */15 *  *   *   *     /usr/lib/ckan/default/bin/paster --plugin=ckanext-harvest harvester run --config=/etc/ckan/std/std.ini
 
    This particular example will check for pending jobs every fifteen minutes.
    You can of course modify this periodicity, this `Wikipedia page <http://en.wikipedia.org/wiki/Cron#CRON_expression>`_
    has a good overview of the crontab syntax.
 
+Community
+=========
+
+* Developer mailing list: `ckan-dev@lists.okfn.org <http://lists.okfn.org/mailman/listinfo/ckan-dev>`_
+* Developer IRC channel: `#ckan on irc.freenode.net <http://webchat.freenode.net/?channels=ckan>`_
+* `Issue tracker <https://github.com/ckan/ckanext-harvest/issues>`_
+
+
+Contributing
+============
+
+For contributing to ckanext-spatial or its documentation, follow the same
+guidelines that apply to CKAN core, described in
+`CONTRIBUTING <https://github.com/ckan/ckan/blob/master/CONTRIBUTING.rst>`_.
+
+
+License
+=======
+
+This extension is open and licensed under the GNU Affero General Public License (AGPL) v3.0.
+Its full text may be found at:
+
+http://www.fsf.org/licensing/licenses/agpl-3.0.html
+
 
 .. _Supervisor: http://supervisord.org
-

@@ -7,6 +7,12 @@ from ckan import logic
 from ckan import model
 import ckan.plugins as p
 from ckan.lib.plugins import DefaultDatasetForm
+try:
+    from ckan.lib.plugins import DefaultTranslation
+except ImportError:
+    class DefaultTranslation():
+        pass
+
 from ckan.lib.navl import dictization_functions
 
 from ckanext.harvest import logic as harvest_logic
@@ -15,12 +21,14 @@ from ckanext.harvest.model import setup as model_setup
 from ckanext.harvest.model import HarvestSource, HarvestJob, HarvestObject
 
 
+
 log = getLogger(__name__)
 assert not log.disabled
 
 DATASET_TYPE_NAME = 'harvest'
 
-class Harvest(p.SingletonPlugin, DefaultDatasetForm):
+
+class Harvest(p.SingletonPlugin, DefaultDatasetForm, DefaultTranslation):
 
     p.implements(p.IConfigurable)
     p.implements(p.IRoutes, inherit=True)
@@ -31,6 +39,9 @@ class Harvest(p.SingletonPlugin, DefaultDatasetForm):
     p.implements(p.IPackageController, inherit=True)
     p.implements(p.ITemplateHelpers)
     p.implements(p.IFacets, inherit=True)
+    if p.toolkit.check_ckan_version(min_version='2.5.0'):
+        p.implements(p.ITranslation, inherit=True)
+
 
     startup = False
 
@@ -56,7 +67,9 @@ class Harvest(p.SingletonPlugin, DefaultDatasetForm):
 
     def before_view(self, data_dict):
 
-        if not 'type' in data_dict or data_dict['type'] != DATASET_TYPE_NAME:
+        # check_ckan_version should be more clever than this
+        if p.toolkit.check_ckan_version(max_version='2.1.99') and (
+           not 'type' in data_dict or data_dict['type'] != DATASET_TYPE_NAME):
             # This is a normal dataset, check if it was harvested and if so, add
             # info about the HarvestObject and HarvestSource
             harvest_object = model.Session.query(HarvestObject) \
@@ -84,7 +97,7 @@ class Harvest(p.SingletonPlugin, DefaultDatasetForm):
                 log.error('Harvest source not found for dataset {0}'.format(data_dict['id']))
                 return data_dict
 
-            data_dict['status'] = harvest_logic.action.get.harvest_source_show_status(context, {'id': source.id})
+            data_dict['status'] = p.toolkit.get_action('harvest_source_show_status')(context, {'id': source.id})
 
         elif not 'type' in data_dict or data_dict['type'] != DATASET_TYPE_NAME:
             # This is a normal dataset, check if it was harvested and if so, add
@@ -95,7 +108,21 @@ class Harvest(p.SingletonPlugin, DefaultDatasetForm):
                     .filter(HarvestObject.current==True) \
                     .first()
 
-            # validate is false is passed only on indexing.
+            # If the harvest extras are there, remove them. This can happen eg
+            # when calling package_update or resource_update, which call
+            # package_show
+            if data_dict.get('extras'):
+                data_dict['extras'][:] = [e for e in data_dict.get('extras', [])
+                                          if not e['key']
+                                          in ('harvest_object_id', 'harvest_source_id', 'harvest_source_title',)]
+
+
+            # We only want to add these extras at index time so they are part
+            # of the cached data_dict used to display, search results etc. We
+            # don't want them added when editing the dataset, otherwise we get
+            # duplicated key errors.
+            # The only way to detect indexing right now is checking that
+            # validate is set to False.
             if harvest_object and not context.get('validate', True):
                 for key, value in [
                     ('harvest_object_id', harvest_object.id),
@@ -135,63 +162,37 @@ class Harvest(p.SingletonPlugin, DefaultDatasetForm):
 
         p.toolkit.c.dataset_type = DATASET_TYPE_NAME
 
-    def form_to_db_schema_options(self, options):
-        '''
-            Similar to form_to_db_schema but with further options to allow
-            slightly different schemas, eg for creation or deletion on the API.
-        '''
-        schema = self.form_to_db_schema()
 
-        # Tweak the default schema to allow using the same id as the harvest source
-        # if creating datasets for the harvest sources
-        if self.startup:
-            schema['id'] = [unicode]
-        return schema
-
-    def form_to_db_schema(self):
+    def create_package_schema(self):
         '''
         Returns the schema for mapping package data from a form to a format
         suitable for the database.
         '''
-        from ckanext.harvest.logic.schema import harvest_source_form_to_db_schema
+        from ckanext.harvest.logic.schema import harvest_source_create_package_schema
+        schema = harvest_source_create_package_schema()
+        if self.startup:
+            schema['id'] = [unicode]
 
-        return harvest_source_form_to_db_schema()
+        return schema
 
-    def db_to_form_schema_options(self, options):
+    def update_package_schema(self):
         '''
-            Similar to db_to_form_schema but with further options to allow
-            slightly different schemas, eg for creation or deletion on the API.
+        Returns the schema for mapping package data from a form to a format
+        suitable for the database.
         '''
-        return self.db_to_form_schema()
+        from ckanext.harvest.logic.schema import harvest_source_update_package_schema
+        schema = harvest_source_update_package_schema()
 
-    def db_to_form_schema(self):
+        return schema
+
+    def show_package_schema(self):
         '''
         Returns the schema for mapping package data from the database into a
         format suitable for the form
         '''
-        from ckanext.harvest.logic.schema import harvest_source_db_to_form_schema
+        from ckanext.harvest.logic.schema import harvest_source_show_package_schema
 
-        return harvest_source_db_to_form_schema()
-
-    def check_data_dict(self, data_dict, schema=None):
-        '''Check if the return data is correct, mostly for checking out
-        if spammers are submitting only part of the form'''
-
-        surplus_keys_schema = ['__extras', '__junk', 'extras', 'notes',
-                               'extras_validation', 'save', 'return_to', 'type',
-                               'state', 'owner_org', 'frequency', 'config',
-                               'organization']
-
-        if not schema:
-            schema = self.form_to_db_schema()
-        schema_keys = schema.keys()
-        keys_in_schema = set(schema_keys) - set(surplus_keys_schema)
-
-        missing_keys = keys_in_schema - set(data_dict.keys())
-        if missing_keys:
-            msg = 'Incorrect form fields posted, missing %s' % missing_keys
-            log.info(msg)
-            raise dictization_functions.DataError(msg)
+        return harvest_source_show_package_schema()
 
     def configure(self, config):
 
@@ -213,12 +214,14 @@ class Harvest(p.SingletonPlugin, DefaultDatasetForm):
                 action='refresh')
         map.connect('{0}_admin'.format(DATASET_TYPE_NAME), '/' + DATASET_TYPE_NAME + '/admin/:id', controller=controller, action='admin')
         map.connect('{0}_about'.format(DATASET_TYPE_NAME), '/' + DATASET_TYPE_NAME + '/about/:id', controller=controller, action='about')
+        map.connect('{0}_clear'.format(DATASET_TYPE_NAME), '/' + DATASET_TYPE_NAME + '/clear/:id', controller=controller, action='clear')
 
         map.connect('harvest_job_list', '/' + DATASET_TYPE_NAME + '/{source}/job', controller=controller, action='list_jobs')
         map.connect('harvest_job_show_last', '/' + DATASET_TYPE_NAME + '/{source}/job/last', controller=controller, action='show_last_job')
         map.connect('harvest_job_show', '/' + DATASET_TYPE_NAME + '/{source}/job/{id}', controller=controller, action='show_job')
 
         map.connect('harvest_object_show', '/' + DATASET_TYPE_NAME + '/object/:id', controller=controller, action='show_object')
+        map.connect('harvest_object_for_dataset_show', '/dataset/harvest_object/:id', controller=controller, action='show_object', ref_type='dataset')
 
         org_controller = 'ckanext.harvest.controllers.organization:OrganizationController'
         map.connect('{0}_org_list'.format(DATASET_TYPE_NAME), '/organization/' + DATASET_TYPE_NAME + '/' + '{id}', controller=org_controller, action='source_list')
@@ -295,19 +298,17 @@ def _add_extra(data_dict, key, value):
 
 def _get_logic_functions(module_root, logic_functions = {}):
 
-    for module_name in ['get', 'create', 'update','delete']:
+    for module_name in ['get', 'create', 'update', 'patch', 'delete']:
         module_path = '%s.%s' % (module_root, module_name,)
-        try:
-            module = __import__(module_path)
-        except ImportError:
-            log.debug('No auth module for action "{0}"'.format(module_name))
-            continue
+
+        module = __import__(module_path)
 
         for part in module_path.split('.')[1:]:
             module = getattr(module, part)
 
         for key, value in module.__dict__.items():
-            if not key.startswith('_') and isinstance(value, types.FunctionType):
+            if not key.startswith('_') and  (hasattr(value, '__call__')
+                        and (value.__module__ == module_path)):
                 logic_functions[key] = value
 
     return logic_functions
