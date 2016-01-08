@@ -1,5 +1,6 @@
 import urllib2
 import httplib
+import HTMLParser
 
 from ckan.lib.base import c
 from ckan import model
@@ -304,7 +305,8 @@ class CKANHarvester(HarvesterBase):
         self._set_config(harvest_object.job.source.config)
 
         try:
-            package_dict = json.loads(harvest_object.content)
+            h = HTMLParser.HTMLParser()
+            package_dict = json.loads(h.unescape(harvest_object.content))
 
             if package_dict.get('type') == 'harvest':
                 log.warn('Remote dataset is a harvest source, ignoring...')
