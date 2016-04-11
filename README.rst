@@ -8,8 +8,13 @@ ckanext-harvest - Remote harvesting extension
 This extension provides a common harvesting framework for ckan extensions
 and adds a CLI and a WUI to CKAN to manage harvesting sources and jobs.
 
+
 Installation
 ============
+
+This extension requires CKAN v2.0 or later on both the CKAN it is installed
+into and the CKANs it harvests. However you are unlikely to encounter a CKAN
+running a version lower than 2.0.
 
 1. The harvest extension can use two different backends. You can choose whichever
    you prefer depending on your needs, but Redis has been found to be more stable
@@ -192,8 +197,7 @@ Authorization
 Starting from CKAN 2.0, harvest sources behave exactly the same as datasets
 (they are actually internally implemented as a dataset type). That means they
 can be searched and faceted, and that the same authorization rules can be
-applied to them. The default authorization settings are based on organizations
-(equivalent to the `publisher profile` found in old versions).
+applied to them. The default authorization settings are based on organizations.
 
 Have a look at the `Authorization <http://docs.ckan.org/en/latest/authorization.html>`_
 documentation on CKAN core to see how to configure your instance depending on
@@ -231,7 +235,7 @@ field. The currently supported configuration options are:
     * {dataset_id}
     * {harvest_source_id}
     * {harvest_source_url}   # Will be stripped of trailing forward slashes (/)
-    * {harvest_source_title}   # Requires CKAN 1.6
+    * {harvest_source_title}
     * {harvest_job_id}
     * {harvest_object_id}
 
@@ -592,7 +596,8 @@ following steps with the one you are using.
    describe the tasks that need to be monitored. This configuration files are
    stored in ``/etc/supervisor/conf.d``.
 
-   Create a file named ``/etc/supervisor/conf.d/ckan_harvesting.conf``, and copy the following contents::
+   Create a file named ``/etc/supervisor/conf.d/ckan_harvesting.conf``, and
+   copy the following contents::
 
 
         ; ===============================
@@ -683,10 +688,11 @@ following steps with the one you are using.
 
     sudo crontab -e -u ckan
 
-   Note that we are running this command as the same user we configured the processes to be run with
-   (`ckan` in our example).
+   Note that we are running this command as the same user we configured the
+   processes to be run with (`ckan` in our example).
 
-   Paste this line into your crontab, again replacing the paths to paster and the ini file with yours::
+   Paste this line into your crontab, again replacing the paths to paster and
+   the ini file with yours::
 
     # m  h  dom mon dow   command
     */15 *  *   *   *     /usr/lib/ckan/default/bin/paster --plugin=ckanext-harvest harvester run --config=/etc/ckan/std/std.ini
@@ -694,6 +700,26 @@ following steps with the one you are using.
    This particular example will check for pending jobs every fifteen minutes.
    You can of course modify this periodicity, this `Wikipedia page <http://en.wikipedia.org/wiki/Cron#CRON_expression>`_
    has a good overview of the crontab syntax.
+
+Tests
+=====
+
+You can run the tests like this:
+
+    cd ckanext-harvest
+    nosetests --reset-db --ckan --with-pylons=test-core.ini ckanext/harvest/tests
+
+Here are some common errors and solutions:
+
+* ``(OperationalError) no such table: harvest_object_error u'delete from "harvest_object_error"``
+  The database has got into in a bad state. Run the tests again but with the ``--reset-db`` parameter.
+
+* ``(ProgrammingError) relation "harvest_object_extra" does not exist``
+  The database has got into in a bad state. Run the tests again but *without* the ``--reset-db`` parameter.
+
+* ``(OperationalError) near "SET": syntax error``
+  You are testing with SQLite as the database, but the CKAN Harvester needs PostgreSQL. Specify test-core.ini instead of test.ini.
+
 
 Community
 =========

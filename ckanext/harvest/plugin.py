@@ -87,6 +87,16 @@ class Harvest(p.SingletonPlugin, DefaultDatasetForm, DefaultTranslation):
         return data_dict
 
 
+    def before_search(self, search_params):
+        '''Prevents the harvesters being shown in dataset search results.'''
+
+        fq = search_params.get('fq', '')
+        if 'dataset_type:harvest' not in fq:
+            fq = u"{0} -dataset_type:harvest".format(search_params.get('fq', ''))
+            search_params.update({'fq': fq})
+
+        return search_params
+
     def after_show(self, context, data_dict):
 
         if 'type' in data_dict and data_dict['type'] == DATASET_TYPE_NAME:
@@ -97,7 +107,14 @@ class Harvest(p.SingletonPlugin, DefaultDatasetForm, DefaultTranslation):
                 log.error('Harvest source not found for dataset {0}'.format(data_dict['id']))
                 return data_dict
 
-            data_dict['status'] = p.toolkit.get_action('harvest_source_show_status')(context, {'id': source.id})
+            st_action_name = 'harvest_source_show_status'
+            try:
+                status_action = p.toolkit.get_action(st_action_name)
+            except KeyError:
+                logic.clear_actions_cache()
+                status_action = p.toolkit.get_action(st_action_name)
+
+            data_dict['status'] = status_action(context, {'id': source.id})
 
         elif not 'type' in data_dict or data_dict['type'] != DATASET_TYPE_NAME:
             # This is a normal dataset, check if it was harvested and if so, add
@@ -229,12 +246,14 @@ class Harvest(p.SingletonPlugin, DefaultDatasetForm, DefaultTranslation):
         return map
 
     def update_config(self, config):
-        # check if new templates
-        templates = 'templates'
-        if p.toolkit.check_ckan_version(min_version='2.0'):
-            if not p.toolkit.asbool(config.get('ckan.legacy_templates', False)):
-                templates = 'templates_new'
-        p.toolkit.add_template_directory(config, templates)
+        if not p.toolkit.check_ckan_version(min_version='2.0'):
+            assert 0, 'CKAN before 2.0 not supported by ckanext-harvest - '\
+                'genshi templates not supported any more'
+        if p.toolkit.asbool(config.get('ckan.legacy_templates', False)):
+            log.warn('Old genshi templates not supported any more by '
+                     'ckanext-harvest so you should set ckan.legacy_templates '
+                     'option to True any more.')
+        p.toolkit.add_template_directory(config, 'templates')
         p.toolkit.add_public_directory(config, 'public')
         p.toolkit.add_resource('fanstatic_library', 'ckanext-harvest')
         p.toolkit.add_resource('public/ckanext/harvest/javascript', 'harvest-extra-field')

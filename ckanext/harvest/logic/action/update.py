@@ -109,16 +109,19 @@ def harvest_source_clear(context, data_dict):
 
     model = context['model']
 
-    sql = '''select id from related where id in (
-              select related_id from related_dataset where dataset_id in (
-                  select package_id from harvest_object
-                  where harvest_source_id = '{harvest_source_id}'));'''.format(
-        harvest_source_id=harvest_source_id)
-    result = model.Session.execute(sql)
-    ids = []
-    for row in result:
-        ids.append(row[0])
-    related_ids = "('" + "','".join(ids) + "')"
+    # CKAN-2.6 or above: related don't exist any more
+    if toolkit.check_ckan_version(max_version='2.5.99'):
+
+        sql = '''select id from related where id in (
+                  select related_id from related_dataset where dataset_id in (
+                      select package_id from harvest_object
+                      where harvest_source_id = '{harvest_source_id}'));'''.format(
+            harvest_source_id=harvest_source_id)
+        result = model.Session.execute(sql)
+        ids = []
+        for row in result:
+            ids.append(row[0])
+        related_ids = "('" + "','".join(ids) + "')"
 
     sql = '''begin;
         update package set state = 'to_delete' where id in (
@@ -194,15 +197,27 @@ def harvest_source_clear(context, data_dict):
         select id from package where state = 'to_delete');
     delete from member where table_id in (
         select id from package where state = 'to_delete');
-    delete from related_dataset where dataset_id in (
-        select id from package where state = 'to_delete');
-    delete from related where id in {related_ids};
-    delete from package where id in (
-        select id from package where state = 'to_delete');
-    commit;
-    '''.format(
-        harvest_source_id=harvest_source_id, related_ids=related_ids)
+     '''.format(
+        harvest_source_id=harvest_source_id)
 
+    if toolkit.check_ckan_version(max_version='2.5.99'):
+        sql += '''
+        delete from related_dataset where dataset_id in (
+            select id from package where state = 'to_delete');
+        delete from related where id in {related_ids};
+        delete from package where id in (
+            select id from package where state = 'to_delete');
+        '''.format(related_ids=related_ids)
+    else:
+        # CKAN-2.6 or above: related don't exist any more
+        sql += '''
+        delete from package where id in (
+            select id from package where state = 'to_delete');
+        '''
+
+    sql += '''
+    commit;
+    '''
     model.Session.execute(sql)
 
     # Refresh the index for this source to update the status object
@@ -427,17 +442,21 @@ def harvest_jobs_run(context, data_dict):
     if len(jobs):
         for job in jobs:
             if job['gather_finished']:
-                objects = \
+                num_objects_in_progress = \
                     session.query(HarvestObject.id) \
                            .filter(HarvestObject.harvest_job_id == job['id']) \
                            .filter(and_((HarvestObject.state != u'COMPLETE'),
                                         (HarvestObject.state != u'ERROR'))) \
-                           .order_by(HarvestObject.import_finished.desc())
+                           .count()
 
-                if objects.count() == 0:
+                if num_objects_in_progress == 0:
                     job_obj = HarvestJob.get(job['id'])
                     job_obj.status = u'Finished'
+                    log.info('Marking job as finished %s %s',
+                             job_obj.source.url, job_obj.id)
 
+                    # save the time of finish, according to the last running
+                    # object
                     last_object = session.query(HarvestObject) \
                         .filter(HarvestObject.harvest_job_id == job['id']) \
                         .filter(HarvestObject.import_finished != None) \
@@ -448,7 +467,7 @@ def harvest_jobs_run(context, data_dict):
                     else:
                         job_obj.finished = job['gather_finished']
                     job_obj.save()
-                    log.info('Marking job as finished: %s', job_obj)
+
                     # Reindex the harvest source dataset so it has the latest
                     # status
                     get_action('harvest_source_reindex')(
