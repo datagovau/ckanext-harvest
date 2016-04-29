@@ -39,14 +39,5 @@ setup(
 	test_action_harvester=ckanext.harvest.tests.test_action:MockHarvesterForActionTests
 	[paste.paster_command]
 	harvester = ckanext.harvest.commands.harvester:Harvester
-    [babel.extractors]
-    ckan = ckan.lib.extract:extract_ckan
 	""",
-        message_extractors={
-            'ckanext': [
-                ('**.py', 'python', None),
-                ('**.js', 'javascript', None),
-                ('**/templates/**.html', 'ckan', None),
-            ],
-        }
 )

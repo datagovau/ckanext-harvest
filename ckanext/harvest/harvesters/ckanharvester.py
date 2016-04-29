@@ -4,6 +4,7 @@ import httplib
 import HTMLParser
 import datetime
 import socket
+import re
 
 from sqlalchemy import exists
 
@@ -17,9 +18,11 @@ from ckan.plugins import toolkit
 from ckanext.harvest.model import HarvestJob, HarvestObject, HarvestGatherError
 
 import logging
+
 log = logging.getLogger(__name__)
 
 from base import HarvesterBase
+
 
 class CKANHarvester(HarvesterBase):
     '''
@@ -62,7 +65,7 @@ class CKANHarvester(HarvesterBase):
 
     def _get_group(self, base_url, group_name):
         url = base_url + self._get_action_api_offset() + '/group_show?id=' + \
-            munge_name(group_name)
+              munge_name(group_name)
         try:
             content = self._get_content(url)
             return json.loads(content)
@@ -72,7 +75,7 @@ class CKANHarvester(HarvesterBase):
 
     def _get_organization(self, base_url, org_name):
         url = base_url + self._get_action_api_offset() + \
-            '/organization_show?id=' + org_name
+              '/organization_show?id=' + org_name
         try:
             content = self._get_content(url)
             content_dict = json.loads(content)
@@ -82,7 +85,7 @@ class CKANHarvester(HarvesterBase):
             raise RemoteResourceError(
                 'Could not fetch/decode remote organization')
 
-    def _set_config(self,config_str):
+    def _set_config(self, config_str):
         if config_str:
             self.config = json.loads(config_str)
             if 'api_version' in self.config:
@@ -336,21 +339,21 @@ class CKANHarvester(HarvesterBase):
         # look for jobs with no gather errors
         jobs = \
             model.Session.query(HarvestJob) \
-                 .filter(HarvestJob.source == harvest_job.source) \
-                 .filter(HarvestJob.gather_started != None) \
-                 .filter(HarvestJob.status == 'Finished') \
-                 .filter(HarvestJob.id != harvest_job.id) \
-                 .filter(
-                     ~exists().where(
-                         HarvestGatherError.harvest_job_id == HarvestJob.id)) \
-                 .order_by(HarvestJob.gather_started.desc())
+                .filter(HarvestJob.source == harvest_job.source) \
+                .filter(HarvestJob.gather_started != None) \
+                .filter(HarvestJob.status == 'Finished') \
+                .filter(HarvestJob.id != harvest_job.id) \
+                .filter(
+                ~exists().where(
+                    HarvestGatherError.harvest_job_id == HarvestJob.id)) \
+                .order_by(HarvestJob.gather_started.desc())
         # now check them until we find one with no fetch/import errors
         # (looping rather than doing sql, in case there are lots of objects
         # and lots of jobs)
         for job in jobs:
             for obj in job.objects:
                 if obj.current is False and \
-                        obj.report_status != 'not modified':
+                                obj.report_status != 'not modified':
                     # unsuccessful, so go onto the next job
                     break
             else:
@@ -379,6 +382,7 @@ class CKANHarvester(HarvesterBase):
         self._set_config(harvest_object.job.source.config)
 
         try:
+
             h = HTMLParser.HTMLParser()
             package_dict = json.loads(h.unescape(harvest_object.content))
 
@@ -386,15 +390,13 @@ class CKANHarvester(HarvesterBase):
                 log.warn('Remote dataset is a harvest source, ignoring...')
                 return True
 
-            log.info(package_dict['extras'])
-
-            if package_dict['extras'].get('harvest_portal'):
+            if 'harvest_portal' in map(lambda u: u.get('key', ""), package_dict.get('extras', [{}])):
                 log.warn('Remote dataset is search partnership harvested, ignoring...')
                 return True
 
             if package_dict.get('harvest_source_title') and not self.config.get('harvested_datasets',
                                                                                 None) and not self.config.get(
-                    'harvested_datasets_whitelist', None):
+                'harvested_datasets_whitelist', None):
                 log.warn('Remote dataset has been harvested from another source, ignoring...')
                 return True
 
@@ -417,26 +419,38 @@ class CKANHarvester(HarvesterBase):
             #    log.info('Package name %s does not already exist' %  package_dict['name'])
 
             # Set default tags if needed
-            default_tags = self.config.get('default_tags', [])
+            default_tags = self.config.get('default_tags', [{}])
             if default_tags:
                 if not 'tags' in package_dict:
-                    package_dict['tags'] = []
+                    package_dict['tags'] = [{}]
                 package_dict['tags'].extend(
                     [t for t in default_tags if t not in package_dict['tags']])
 
-            def munge_tag(name):
-                # convert separators
-                name = re.sub('[.:/-]', ' ', name)
-                # take out not-allowed characters
-                name = re.sub('[^a-zA-Z0-9-_]', ' ', name).lower()
-                # remove doubles
-                name = re.sub('  ', '-', name)
-                # remove leading or trailing hyphens
-                name = name.strip(' ')[:99]
-                return name
+            def munge_tag(input):
+                if isinstance(input,dict):
+                    name = re.sub('[.:/-]', ' ', input.get('name',""))
+                    name = re.sub('[^a-zA-Z0-9-_]', ' ', name).lower()
+                    name = re.sub('  ', '-', name)
+                    name = re.sub('  ', '-', name)
+                    name = name.strip(' ')[:99]
+                    input['name'] = name
+                    if (name == ""):
+                        return None
+                    name = re.sub('[.:/-]', ' ', input.get('display_name', ""))
+                    name = re.sub('[^a-zA-Z0-9-_]', ' ', name).lower()
+                    name = re.sub('  ', '-', name)
+                    name = re.sub('  ', '-', name)
+                    name = name.strip(' ')[:99]
+                    input['display_name'] = name
+                    if (name == ""):
+                        return None
+                else:
+                    return None
+                return input
 
-            package_dict['tags'] = [munge_tag(t) for t in package_dict['tags']]
+            package_dict['tags'] = [x for x in [munge_tag(t) for t in package_dict['tags']] if x is not None]
             remote_groups = self.config.get('remote_groups', None)
+
             if not remote_groups in ('only_local', 'create'):
                 # Ignore remote groups
                 package_dict.pop('groups', None)
@@ -477,8 +491,11 @@ class CKANHarvester(HarvesterBase):
                 package_dict['groups'] = validated_groups
 
             # Local harvest source organization
-            source_dataset = get_action('package_show')(context, {'id': harvest_object.source.id})
-            local_org = source_dataset.get('owner_org')
+            try:
+                source_dataset = get_action('package_show')(context, {'id': harvest_object.source.id})
+                local_org = source_dataset.get('owner_org')
+            except:
+                local_org = ""
 
             remote_orgs = self.config.get('remote_orgs', None)
 
@@ -509,7 +526,8 @@ class CKANHarvester(HarvesterBase):
                                     # this especially targets older versions of CKAN
                                     org = self._get_group(harvest_object.source.url, remote_org)
 
-                                for key in ['packages', 'created', 'users', 'groups', 'tags', 'extras', 'display_name', 'type']:
+                                for key in ['packages', 'created', 'users', 'groups', 'tags', 'extras', 'display_name',
+                                            'type']:
                                     org.pop(key, None)
                                 get_action('organization_create')(context, org)
                                 log.info('Organization %s has been newly created', remote_org)
@@ -529,25 +547,26 @@ class CKANHarvester(HarvesterBase):
             # Find any extras whose values are not strings and try to convert
             # them to strings, as non-string extras are not allowed anymore in
             # CKAN 2.0.
-            for key in package_dict['extras'].keys():
-                if not isinstance(package_dict['extras'][key], basestring):
+            for idx, exDict in enumerate(package_dict.get('extras', [{}])):
+                if not isinstance(exDict.get('value', ""), basestring):
                     try:
-                        package_dict['extras'][key] = json.dumps(
-                                package_dict['extras'][key])
+                        package_dict['extras'][idx]['value'] = json.dumps(exDict['value'])
                     except TypeError:
                         # If converting to a string fails, just delete it.
-                        del package_dict['extras'][key]
+                        del package_dict['extras'][idx]
 
             # Set default extras if needed
             default_extras = self.config.get('default_extras', {})
+
             def get_extra(key, package_dict):
                 for extra in package_dict.get('extras', []):
                     if extra['key'] == key:
                         return extra
+
             if default_extras:
                 override_extras = self.config.get('override_extras', False)
                 if not 'extras' in package_dict:
-                    package_dict['extras'] = {}
+                    package_dict['extras'] = []
                 for key, value in default_extras.iteritems():
                     existing_extra = get_extra(key, package_dict)
                     if existing_extra and not override_extras:
@@ -565,7 +584,6 @@ class CKANHarvester(HarvesterBase):
                             harvest_job_id=harvest_object.job.id,
                             harvest_object_id=harvest_object.id,
                             dataset_id=package_dict['id'])
-
                     package_dict['extras'].append({'key': key, 'value': value})
 
             for resource in package_dict.get('resources', []):
@@ -588,17 +606,21 @@ class CKANHarvester(HarvesterBase):
                                     (harvest_object.guid, e.error_dict),
                                     harvest_object, 'Import')
         except Exception, e:
+            log.info('Failed with general exception... %r' % e)
             self._save_object_error('%s' % e, harvest_object, 'Import')
 
 
 class ContentFetchError(Exception):
     pass
 
+
 class ContentNotFoundError(ContentFetchError):
     pass
 
+
 class RemoteResourceError(Exception):
     pass
+
 
 class SearchError(Exception):
     pass
