@@ -1,3 +1,5 @@
+from __future__ import print_function
+
 import json
 import re
 import copy
@@ -54,6 +56,13 @@ class MockCkanHandler(SimpleHTTPServer.SimpleHTTPRequestHandler):
             dataset = self.get_dataset(dataset_ref)
             if dataset:
                 return self.respond_action(dataset)
+        if self.path.startswith('/api/action/group_show'):
+            params = self.get_url_params()
+            group_ref = params['id']
+            group = self.get_group(group_ref)
+            if group:
+                return self.respond_action(group)
+
         if self.path.startswith('/api/search/dataset'):
             params = self.get_url_params()
             if params.keys() == ['organization']:
@@ -135,6 +144,12 @@ class MockCkanHandler(SimpleHTTPServer.SimpleHTTPRequestHandler):
                     dataset['tags'] = INVALID_TAGS
                 return dataset
 
+    def get_group(self, group_ref):
+        for group in GROUPS:
+            if group['name'] == group_ref or \
+                    group['id'] == group_ref:
+                return group
+
     def get_org(self, org_ref):
         for org in ORGS:
             if org['name'] == org_ref or \
@@ -175,7 +190,7 @@ def serve(port=PORT):
 
     httpd = TestServer(("", PORT), MockCkanHandler)
 
-    print 'Serving test HTTP server at port', PORT
+    print('Serving test HTTP server at port {}'.format(PORT))
 
     httpd_thread = Thread(target=httpd.serve_forever)
     httpd_thread.setDaemon(True)
@@ -196,6 +211,7 @@ DATASETS = [
      'title': 'Test Dataset1',
      'owner_org': 'org1-id',
      'tags': [{'name': 'test-tag'}],
+     'groups': [{'id': 'group1-id', 'name': 'group1'}],
      'extras': []},
     {
     "id": "1c65c66a-fdec-4138-9c64-0f9bf087bcbb",
@@ -293,6 +309,7 @@ DATASETS = [
         "recent": 0
     },
     "taxonomy_url": "",
+    "groups": [{"id": "remote-group-id", "name": "remote-group"}],
     "groups": [],
     "creator_user_id": None,
     "national_statistic": "no",
@@ -486,6 +503,14 @@ ORGS = [
     {'id': 'aa1e068a-23da-4563-b9c2-2cad272b663e',
      'name': 'cabinet-office'}
 ]
+
+GROUPS = [
+    {'id': 'group1-id',
+     'name': 'group1'},
+    {'id': '9853c3e1-eebb-4e8c-9ae7-1668a01bf2ca',
+     'name': 'finances'}
+]
+
 
 REVISIONS = [
     {

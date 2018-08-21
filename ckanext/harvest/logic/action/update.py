@@ -5,7 +5,6 @@ import logging
 import datetime
 
 from pylons import config
-from paste.deploy.converters import asbool
 from sqlalchemy import and_, or_
 
 from ckan.lib.search.index import PackageSearchIndex
@@ -31,6 +30,9 @@ from ckanext.harvest.logic.dictization import harvest_job_dictize
 
 from ckanext.harvest.logic.action.get import (
     harvest_source_show, harvest_job_list, _get_sources_for_user)
+
+import ckan.lib.mailer as mailer
+from itertools import islice
 
 log = logging.getLogger(__name__)
 
@@ -226,6 +228,73 @@ def harvest_source_clear(context, data_dict):
     return {'id': harvest_source_id}
 
 
+def harvest_sources_job_history_clear(context, data_dict):
+    '''
+    Clears the history for all active harvest sources. All jobs and objects related to a harvest source will
+    be cleared, but keeps the source itself.
+    This is useful to clean history of long running harvest sources to start again fresh.
+    The datasets imported from the harvest source will NOT be deleted!!!
+
+    '''
+    check_access('harvest_sources_clear', context, data_dict)
+
+    job_history_clear_results = []
+    # We assume that the maximum of 1000 (hard limit) rows should be enough
+    result = logic.get_action('package_search')(context, {'fq': '+dataset_type:harvest', 'rows': 1000})
+    harvest_packages = result['results']
+    if harvest_packages:
+        for data_dict in harvest_packages:
+            try:
+                clear_result = get_action('harvest_source_job_history_clear')(context, {'id': data_dict['id']})
+                job_history_clear_results.append(clear_result)
+            except NotFound:
+                # Ignoring not existent harvest sources because of a possibly corrupt search index
+                # Logging was already done in called function
+                pass
+
+    return job_history_clear_results
+
+
+def harvest_source_job_history_clear(context, data_dict):
+    '''
+    Clears all jobs and objects related to a harvest source, but keeps the source itself.
+    This is useful to clean history of long running harvest sources to start again fresh.
+    The datasets imported from the harvest source will NOT be deleted!!!
+
+    :param id: the id of the harvest source to clear
+    :type id: string
+
+    '''
+    check_access('harvest_source_clear', context, data_dict)
+
+    harvest_source_id = data_dict.get('id', None)
+
+    source = HarvestSource.get(harvest_source_id)
+    if not source:
+        log.error('Harvest source %s does not exist', harvest_source_id)
+        raise NotFound('Harvest source %s does not exist' % harvest_source_id)
+
+    harvest_source_id = source.id
+
+    model = context['model']
+
+    sql = '''begin;
+    delete from harvest_object_error where harvest_object_id in (select id from harvest_object where harvest_source_id = '{harvest_source_id}');
+    delete from harvest_object_extra where harvest_object_id in (select id from harvest_object where harvest_source_id = '{harvest_source_id}');
+    delete from harvest_object where harvest_source_id = '{harvest_source_id}';
+    delete from harvest_gather_error where harvest_job_id in (select id from harvest_job where source_id = '{harvest_source_id}');
+    delete from harvest_job where source_id = '{harvest_source_id}';
+    commit;
+    '''.format(harvest_source_id=harvest_source_id)
+
+    model.Session.execute(sql)
+
+    # Refresh the index for this source to update the status object
+    get_action('harvest_source_reindex')(context, {'id': harvest_source_id})
+
+    return {'id': harvest_source_id}
+
+
 def harvest_source_index_clear(context, data_dict):
     '''
     Clears all datasets, jobs and objects related to a harvest source, but
@@ -249,15 +318,26 @@ def harvest_source_index_clear(context, data_dict):
     conn = make_connection()
     query = ''' +%s:"%s" +site_id:"%s" ''' % (
         'harvest_source_id', harvest_source_id, config.get('ckan.site_id'))
-    try:
-        conn.delete_query(query)
-        if asbool(config.get('ckan.search.solr_commit', 'true')):
-            conn.commit()
-    except Exception, e:
-        log.exception(e)
-        raise SearchIndexError(e)
-    finally:
-        conn.close()
+
+    solr_commit = toolkit.asbool(config.get('ckan.search.solr_commit', 'true'))
+    if toolkit.check_ckan_version(max_version='2.5.99'):
+        # conn is solrpy
+        try:
+            conn.delete_query(query)
+            if solr_commit:
+                conn.commit()
+        except Exception, e:
+            log.exception(e)
+            raise SearchIndexError(e)
+        finally:
+            conn.close()
+    else:
+        # conn is pysolr
+        try:
+            conn.delete(q=query, commit=solr_commit)
+        except Exception, e:
+            log.exception(e)
+            raise SearchIndexError(e)
 
     return {'id': harvest_source_id}
 
@@ -472,6 +552,11 @@ def harvest_jobs_run(context, data_dict):
                     # status
                     get_action('harvest_source_reindex')(
                         context, {'id': job_obj.source.id})
+
+                    status = get_action('harvest_source_show_status')(context, {'id': job_obj.source.id})
+
+                    if toolkit.asbool(config.get('ckan.harvest.status_mail.errored')) and (status['last_job']['stats']['errored']):
+                        send_error_mail(context, job_obj.source.id, status)
                 else:
                     log.debug('Ongoing job:%s source:%s',
                               job['id'], job['source_id'])
@@ -480,6 +565,101 @@ def harvest_jobs_run(context, data_dict):
     resubmit_jobs()
 
     return []  # merely for backwards compatibility
+
+
+def send_error_mail(context, source_id, status):
+
+    last_job = status['last_job']
+    source = get_action('harvest_source_show')(context, {'id': source_id})
+
+    ckan_site_url = config.get('ckan.site_url')
+    job_url = toolkit.url_for('harvest_job_show', source=source['id'], id=last_job['id'])
+
+    msg = toolkit._('This is a failure-notification of the latest harvest job ({0}) set-up in {1}.').format(job_url, ckan_site_url)
+    msg += '\n\n'
+
+    msg += toolkit._('Harvest Source: {0}').format(source['title']) + '\n'
+    if source.get('config'):
+        msg += toolkit._('Harvester-Configuration: {0}').format(source['config']) + '\n'
+    msg += '\n\n'
+
+    if source['organization']:
+        msg += toolkit._('Organization: {0}').format(source['organization']['name'])
+        msg += '\n\n'
+
+    msg += toolkit._('Harvest Job Id: {0}').format(last_job['id']) + '\n'
+    msg += toolkit._('Created: {0}').format(last_job['created']) + '\n'
+    msg += toolkit._('Finished: {0}').format(last_job['finished']) + '\n\n'
+
+    report = get_action('harvest_job_report')(context, {'id': status['last_job']['id']})
+
+    msg += toolkit._('Records in Error: {0}').format(str(last_job['stats'].get('errored', 0)))
+    msg += '\n'
+
+    obj_error = ''
+    job_error = ''
+
+    for harvest_object_error in islice(report.get('object_errors'), 0, 20):
+        obj_error += harvest_object_error['message'] + '\n'
+
+    for harvest_gather_error in islice(report.get('gather_errors'), 0, 20):
+        job_error += harvest_gather_error['message'] + '\n'
+
+    if (obj_error != '' or job_error != ''):
+        msg += toolkit._('Error Summary')
+        msg += '\n'
+
+    if (obj_error != ''):
+        msg += toolkit._('Document Error')
+        msg += '\n' + obj_error + '\n\n'
+
+    if (job_error != ''):
+        msg += toolkit._('Job Errors')
+        msg += '\n' + job_error + '\n\n'
+
+    if obj_error or job_error:
+        msg += '\n--\n'
+        msg += toolkit._('You are receiving this email because you are currently set-up as Administrator for {0}. Please do not reply to this email as it was sent from a non-monitored address.').format(config.get('ckan.site_title'))
+
+        recipients = []
+
+        # gather sysadmins
+        model = context['model']
+        sysadmins = model.Session.query(model.User).filter(model.User.sysadmin == True).all()
+        for sysadmin in sysadmins:
+            recipients.append({
+                'name': sysadmin.name,
+                'email': sysadmin.email
+            })
+
+        # gather organization-admins
+        if source.get('organization'):
+            members = get_action('member_list')(context, {
+                'id': source['organization']['id'],
+                'object_type': 'user',
+                'capacity': 'admin'
+            })
+            for member in members:
+                member_details = get_action('user_show')(context, {'id': member[0]})
+                if member_details['email']:
+                    recipients.append({
+                        'name': member_details['name'],
+                        'email': member_details['email']
+                    })
+
+        for recipient in recipients:
+            email = {'recipient_name': recipient['name'],
+                     'recipient_email': recipient['email'],
+                     'subject': config.get('ckan.site_title') + ' - Harvesting Job - Error Notification',
+                     'body': msg}
+
+            try:
+                mailer.mail_recipient(**email)
+            except mailer.MailerException:
+                log.error('Sending Harvest-Notification-Mail failed. Message: ' + msg)
+            except Exception as e:
+                log.error(e)
+                raise
 
 
 def harvest_send_job_to_gather_queue(context, data_dict):
@@ -628,11 +808,15 @@ def harvest_source_reindex(context, data_dict):
 
     # Remove configuration values
     new_dict = {}
-    if package_dict.get('config'):
-        config = json.loads(package_dict['config'])
-        for key, value in package_dict.iteritems():
-            if key not in config:
-                new_dict[key] = value
+
+    try:
+        config = json.loads(package_dict.get('config', ''))
+    except ValueError:
+        config = {}
+    for key, value in package_dict.iteritems():
+        if key not in config:
+            new_dict[key] = value
+
     package_index = PackageSearchIndex()
     package_index.index_package(new_dict, defer_commit=defer_commit)
 

@@ -1,21 +1,24 @@
 import copy
 
-from nose.tools import assert_equal
+from nose.tools import assert_equal, assert_raises, assert_in
 import json
 from mock import patch, MagicMock
 
+
 try:
-    from ckan.tests.helpers import reset_db
-    from ckan.tests.factories import Organization
+    from ckan.tests.helpers import reset_db, call_action
+    from ckan.tests.factories import Organization, Group
 except ImportError:
-    from ckan.new_tests.helpers import reset_db
-    from ckan.new_tests.factories import Organization
+    from ckan.new_tests.helpers import reset_db, call_action
+    from ckan.new_tests.factories import Organization, Group
 from ckan import model
+from ckan.plugins import toolkit
 
 from ckanext.harvest.tests.factories import (HarvestSourceObj, HarvestJobObj,
                                              HarvestObjectObj)
 from ckanext.harvest.tests.lib import run_harvest
 import ckanext.harvest.model as harvest_model
+from ckanext.harvest.harvesters.base import HarvesterBase
 from ckanext.harvest.harvesters.ckanharvester import CKANHarvester
 
 import mock_ckan
@@ -31,7 +34,7 @@ def was_last_job_considered_error_free():
     job = MagicMock()
     job.source = last_job.source
     job.id = ''
-    return bool(CKANHarvester._last_error_free_job(job))
+    return bool(HarvesterBase.last_error_free_job(job))
 
 
 class TestCkanHarvester(object):
@@ -158,6 +161,35 @@ class TestCkanHarvester(object):
         assert 'dataset1-id' in results_by_guid
         assert mock_ckan.DATASETS[1]['id'] not in results_by_guid
 
+    def test_remote_groups_create(self):
+        config = {'remote_groups': 'create'}
+        results_by_guid = run_harvest(
+            url='http://localhost:%s' % mock_ckan.PORT,
+            harvester=CKANHarvester(),
+            config=json.dumps(config))
+        assert 'dataset1-id' in results_by_guid
+        # Check that the remote group was created locally
+        call_action('group_show', {}, id=mock_ckan.GROUPS[0]['id'])
+
+    def test_remote_groups_only_local(self):
+        # Create an existing group
+        Group(id='group1-id', name='group1')
+
+        config = {'remote_groups': 'only_local'}
+        results_by_guid = run_harvest(
+            url='http://localhost:%s' % mock_ckan.PORT,
+            harvester=CKANHarvester(),
+            config=json.dumps(config))
+        assert 'dataset1-id' in results_by_guid
+
+        # Check that the dataset was added to the existing local group
+        dataset = call_action('package_show', {}, id=mock_ckan.DATASETS[0]['id'])
+        assert_equal(dataset['groups'][0]['id'], mock_ckan.DATASETS[0]['groups'][0]['id'])
+
+        # Check that the other remote group was not created locally
+        assert_raises(toolkit.ObjectNotFound, call_action, 'group_show', {},
+                      id='remote-group')
+
     def test_harvest_not_modified(self):
         run_harvest(
             url='http://localhost:%s/' % mock_ckan.PORT,
@@ -191,3 +223,99 @@ class TestCkanHarvester(object):
             harvester=CKANHarvester())
         assert not results_by_guid
         assert not was_last_job_considered_error_free()
+
+    def test_default_tags(self):
+        config = {'default_tags': [{'name': 'geo'}]}
+        results_by_guid = run_harvest(
+            url='http://localhost:%s' % mock_ckan.PORT,
+            harvester=CKANHarvester(),
+            config=json.dumps(config))
+        tags = results_by_guid['dataset1-id']['dataset']['tags']
+        tag_names = [tag['name'] for tag in tags]
+        assert 'geo' in tag_names
+
+    def test_default_tags_invalid(self):
+        config = {'default_tags': ['geo']}  # should be list of dicts
+        with assert_raises(toolkit.ValidationError) as harvest_context:
+            run_harvest(
+                url='http://localhost:%s' % mock_ckan.PORT,
+                harvester=CKANHarvester(),
+                config=json.dumps(config))
+        assert_in('default_tags must be a list of dictionaries',
+                  str(harvest_context.exception))
+
+    def test_default_groups(self):
+        Group(id='group1-id', name='group1')
+        Group(id='group2-id', name='group2')
+        Group(id='group3-id', name='group3')
+
+        config = {'default_groups': ['group2-id', 'group3'],
+                  'remote_groups': 'only_local'}
+        tmp_c = toolkit.c
+        try:
+            # c.user is used by the validation (annoying),
+            # however patch doesn't work because it's a weird
+            # StackedObjectProxy, so we swap it manually
+            toolkit.c = MagicMock(user='')
+            results_by_guid = run_harvest(
+                url='http://localhost:%s' % mock_ckan.PORT,
+                harvester=CKANHarvester(),
+                config=json.dumps(config))
+        finally:
+            toolkit.c = tmp_c
+        assert_equal(results_by_guid['dataset1-id']['errors'], [])
+        groups = results_by_guid['dataset1-id']['dataset']['groups']
+        group_names = set(group['name'] for group in groups)
+        # group1 comes from the harvested dataset
+        # group2 & 3 come from the default_groups
+        assert_equal(group_names, set(('group1', 'group2', 'group3')))
+
+    def test_default_groups_invalid(self):
+        Group(id='group2-id', name='group2')
+
+        # should be list of strings
+        config = {'default_groups': [{'name': 'group2'}]}
+        with assert_raises(toolkit.ValidationError) as harvest_context:
+            run_harvest(
+                url='http://localhost:%s' % mock_ckan.PORT,
+                harvester=CKANHarvester(),
+                config=json.dumps(config))
+        assert_in('default_groups must be a list of group names/ids',
+                  str(harvest_context.exception))
+
+    def test_default_extras(self):
+        config = {
+            'default_extras': {
+                'encoding': 'utf8',
+                'harvest_url': '{harvest_source_url}/dataset/{dataset_id}'
+                }}
+        tmp_c = toolkit.c
+        try:
+            # c.user is used by the validation (annoying),
+            # however patch doesn't work because it's a weird
+            # StackedObjectProxy, so we swap it manually
+            toolkit.c = MagicMock(user='')
+            results_by_guid = run_harvest(
+                url='http://localhost:%s' % mock_ckan.PORT,
+                harvester=CKANHarvester(),
+                config=json.dumps(config))
+        finally:
+            toolkit.c = tmp_c
+        assert_equal(results_by_guid['dataset1-id']['errors'], [])
+        extras = results_by_guid['dataset1-id']['dataset']['extras']
+        extras_dict = dict((e['key'], e['value']) for e in extras)
+        assert_equal(extras_dict['encoding'], 'utf8')
+        assert_equal(extras_dict['harvest_url'],
+                     'http://localhost:8998/dataset/dataset1-id')
+
+    def test_default_extras_invalid(self):
+        config = {
+            'default_extras': 'utf8',  # value should be a dict
+            }
+        with assert_raises(toolkit.ValidationError) as harvest_context:
+            run_harvest(
+                url='http://localhost:%s' % mock_ckan.PORT,
+                harvester=CKANHarvester(),
+                config=json.dumps(config))
+        assert_in('default_extras must be a dictionary',
+                  str(harvest_context.exception))

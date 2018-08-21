@@ -1,6 +1,7 @@
 import json
 import factories
 import unittest
+from mock import patch
 from nose.tools import assert_equal, assert_raises
 from nose.plugins.skip import SkipTest
 
@@ -29,6 +30,9 @@ from ckan import model
 
 from ckanext.harvest.interfaces import IHarvester
 import ckanext.harvest.model as harvest_model
+from ckanext.harvest.model import HarvestGatherError, HarvestJob
+from ckanext.harvest.logic import HarvestJobExists
+from ckanext.harvest.logic.action.update import send_error_mail
 
 
 def call_action_api(action, apikey=None, status=200, **kwargs):
@@ -253,7 +257,7 @@ class TestHarvestSourceActionCreate(HarvestSourceActionBase):
 
         for key in source_dict.keys():
             assert_equal(source_dict[key], result[key])
-
+            
         # Check that source was actually created
         source = harvest_model.HarvestSource.get(result['id'])
         assert_equal(source.url, source_dict['url'])
@@ -354,7 +358,7 @@ class TestHarvestSourceActionPatch(HarvestSourceFixtureMixin,
 
 class TestActions(ActionBase):
     def test_harvest_source_clear(self):
-        source = factories.HarvestSourceObj(**SOURCE_DICT)
+        source = factories.HarvestSourceObj(**SOURCE_DICT.copy())
         job = factories.HarvestJobObj(source=source)
         dataset = ckan_factories.Dataset()
         object_ = factories.HarvestObjectObj(job=job, source=source,
@@ -372,50 +376,106 @@ class TestActions(ActionBase):
         assert_equal(harvest_model.HarvestObject.get(object_.id), None)
         assert_equal(model.Package.get(dataset['id']), None)
 
+    def test_harvest_source_job_history_clear(self):
+        # prepare
+        source = factories.HarvestSourceObj(**SOURCE_DICT.copy())
+        job = factories.HarvestJobObj(source=source)
+        dataset = ckan_factories.Dataset()
+        object_ = factories.HarvestObjectObj(job=job, source=source,
+                                             package_id=dataset['id'])
+
+        # execute
+        context = {'model': model, 'session': model.Session,
+                   'ignore_auth': True, 'user': ''}
+        result = toolkit.get_action('harvest_source_job_history_clear')(
+            context, {'id': source.id})
+
+        # verify
+        assert_equal(result, {'id': source.id})
+        source = harvest_model.HarvestSource.get(source.id)
+        assert source
+        assert_equal(harvest_model.HarvestJob.get(job.id), None)
+        assert_equal(harvest_model.HarvestObject.get(object_.id), None)
+        dataset_from_db = model.Package.get(dataset['id'])
+        assert dataset_from_db, 'is None'
+        assert_equal(dataset_from_db.id, dataset['id'])
+
+    def test_harvest_sources_job_history_clear(self):
+        # prepare
+        data_dict = SOURCE_DICT.copy()
+        source_1 = factories.HarvestSourceObj(**data_dict)
+        data_dict['name'] = 'another-source'
+        data_dict['url'] = 'http://another-url'
+        source_2 = factories.HarvestSourceObj(**data_dict)
+
+        job_1 = factories.HarvestJobObj(source=source_1)
+        dataset_1 = ckan_factories.Dataset()
+        object_1_ = factories.HarvestObjectObj(job=job_1, source=source_1,
+                                             package_id=dataset_1['id'])
+        job_2 = factories.HarvestJobObj(source=source_2)
+        dataset_2 = ckan_factories.Dataset()
+        object_2_ = factories.HarvestObjectObj(job=job_2, source=source_2,
+                                             package_id=dataset_2['id'])
+
+        # execute
+        context = {'model': model, 'session': model.Session,
+                   'ignore_auth': True, 'user': ''}
+        result = toolkit.get_action('harvest_sources_job_history_clear')(
+            context, {})
+
+        # verify
+        assert_equal(
+            sorted(result),
+            sorted([{'id': source_1.id}, {'id': source_2.id}]))
+        source_1 = harvest_model.HarvestSource.get(source_1.id)
+        assert source_1
+        assert_equal(harvest_model.HarvestJob.get(job_1.id), None)
+        assert_equal(harvest_model.HarvestObject.get(object_1_.id), None)
+        dataset_from_db_1 = model.Package.get(dataset_1['id'])
+        assert dataset_from_db_1, 'is None'
+        assert_equal(dataset_from_db_1.id, dataset_1['id'])
+        source_2 = harvest_model.HarvestSource.get(source_1.id)
+        assert source_2
+        assert_equal(harvest_model.HarvestJob.get(job_2.id), None)
+        assert_equal(harvest_model.HarvestObject.get(object_2_.id), None)
+        dataset_from_db_2 = model.Package.get(dataset_2['id'])
+        assert dataset_from_db_2, 'is None'
+        assert_equal(dataset_from_db_2.id, dataset_2['id'])
+
     def test_harvest_source_create_twice_with_unique_url(self):
-        # don't use factory because it looks for the existing source
-        data_dict = SOURCE_DICT
+        data_dict = SOURCE_DICT.copy()
+        factories.HarvestSourceObj(**data_dict)
         site_user = toolkit.get_action('get_site_user')(
             {'model': model, 'ignore_auth': True}, {})['name']
-
-        toolkit.get_action('harvest_source_create')(
-            {'user': site_user}, data_dict)
-
-        data_dict['name'] = 'another-source1'
+        data_dict['name'] = 'another-source'
         data_dict['url'] = 'http://another-url'
         toolkit.get_action('harvest_source_create')(
             {'user': site_user}, data_dict)
 
     def test_harvest_source_create_twice_with_same_url(self):
-        # don't use factory because it looks for the existing source
-        data_dict = SOURCE_DICT
+        data_dict = SOURCE_DICT.copy()
+        factories.HarvestSourceObj(**data_dict)
+
         site_user = toolkit.get_action('get_site_user')(
             {'model': model, 'ignore_auth': True}, {})['name']
-
-        toolkit.get_action('harvest_source_create')(
-            {'user': site_user}, data_dict)
-
-        data_dict['name'] = 'another-source2'
+        data_dict['name'] = 'another-source'
         assert_raises(toolkit.ValidationError,
                       toolkit.get_action('harvest_source_create'),
                       {'user': site_user}, data_dict)
 
     def test_harvest_source_create_twice_with_unique_url_and_config(self):
-        # don't use factory because it looks for the existing source
-        data_dict = SOURCE_DICT
+        data_dict = SOURCE_DICT.copy()
+        factories.HarvestSourceObj(**data_dict)
+
         site_user = toolkit.get_action('get_site_user')(
             {'model': model, 'ignore_auth': True}, {})['name']
-
-        toolkit.get_action('harvest_source_create')(
-            {'user': site_user}, data_dict)
-
-        data_dict['name'] = 'another-source3'
+        data_dict['name'] = 'another-source'
         data_dict['config'] = '{"something": "new"}'
         toolkit.get_action('harvest_source_create')(
             {'user': site_user}, data_dict)
 
     def test_harvest_job_create_as_sysadmin(self):
-        source = factories.HarvestSource(**SOURCE_DICT)
+        source = factories.HarvestSource(**SOURCE_DICT.copy())
 
         site_user = toolkit.get_action('get_site_user')(
             {'model': model, 'ignore_auth': True}, {})['name']
@@ -502,3 +562,228 @@ class TestHarvestObject(unittest.TestCase):
 
         self.assertRaises(toolkit.ValidationError, harvest_object_create,
                           context, data_dict)
+
+
+class TestHarvestErrorMail(FunctionalTestBase):
+    @classmethod
+    def setup_class(cls):
+        super(TestHarvestErrorMail, cls).setup_class()
+        reset_db()
+        harvest_model.setup()
+
+    @classmethod
+    def teardown_class(cls):
+        super(TestHarvestErrorMail, cls).teardown_class()
+        reset_db()
+
+    def _create_harvest_source_and_job_if_not_existing(self):
+        site_user = toolkit.get_action('get_site_user')(
+            {'model': model, 'ignore_auth': True}, {})['name']
+
+        context = {
+            'user': site_user,
+            'model': model,
+            'session': model.Session,
+            'ignore_auth': True,
+        }
+        source_dict = {
+            'title': 'Test Source',
+            'name': 'test-source',
+            'url': 'basic_test',
+            'source_type': 'test',
+        }
+
+        try:
+            harvest_source = toolkit.get_action('harvest_source_create')(
+                context,
+                source_dict
+            )
+        except toolkit.ValidationError:
+            harvest_source = toolkit.get_action('harvest_source_show')(
+                context,
+                {'id': source_dict['name']}
+            )
+            pass
+
+        try:
+            job = toolkit.get_action('harvest_job_create')(context, {
+                'source_id': harvest_source['id'], 'run': True})
+        except HarvestJobExists:
+            job = toolkit.get_action('harvest_job_show')(context, {
+                'id': harvest_source['status']['last_job']['id']})
+            pass
+
+        toolkit.get_action('harvest_jobs_run')(context, {})
+        toolkit.get_action('harvest_source_reindex')(context, {'id': harvest_source['id']})
+        return context, harvest_source, job
+
+    def _create_harvest_source_with_owner_org_and_job_if_not_existing(self):
+        site_user = toolkit.get_action('get_site_user')(
+            {'model': model, 'ignore_auth': True}, {})['name']
+
+        context = {
+            'user': site_user,
+            'model': model,
+            'session': model.Session,
+            'ignore_auth': True,
+        }
+
+        test_org = ckan_factories.Organization()
+        test_other_org = ckan_factories.Organization()
+        org_admin_user = ckan_factories.User()
+        org_member_user = ckan_factories.User()
+        other_org_admin_user = ckan_factories.User()
+
+        toolkit.get_action('organization_member_create')(
+            context.copy(),
+            {
+                'id': test_org['id'],
+                'username': org_admin_user['name'],
+                'role': 'admin'
+            }
+        )
+
+        toolkit.get_action('organization_member_create')(
+            context.copy(),
+            {
+                'id': test_org['id'],
+                'username': org_member_user['name'],
+                'role': 'member'
+            }
+        )
+
+        toolkit.get_action('organization_member_create')(
+            context.copy(),
+            {
+                'id': test_other_org['id'],
+                'username': other_org_admin_user['name'],
+                'role': 'admin'
+            }
+        )
+
+        source_dict = {
+            'title': 'Test Source',
+            'name': 'test-source',
+            'url': 'basic_test',
+            'source_type': 'test',
+            'owner_org': test_org['id'],
+            'run': True
+        }
+
+        try:
+            harvest_source = toolkit.get_action('harvest_source_create')(
+                context.copy(),
+                source_dict
+            )
+        except toolkit.ValidationError:
+            harvest_source = toolkit.get_action('harvest_source_show')(
+                context.copy(),
+                {'id': source_dict['name']}
+            )
+            pass
+
+        try:
+            job = toolkit.get_action('harvest_job_create')(context.copy(), {
+                'source_id': harvest_source['id'], 'run': True})
+        except HarvestJobExists:
+            job = toolkit.get_action('harvest_job_show')(context.copy(), {
+                'id': harvest_source['status']['last_job']['id']})
+            pass
+
+        toolkit.get_action('harvest_jobs_run')(context.copy(), {})
+        toolkit.get_action('harvest_source_reindex')(context.copy(), {'id': harvest_source['id']})
+        return context, harvest_source, job
+
+    @patch('ckan.lib.mailer.mail_recipient')
+    def test_error_mail_not_sent(self, mock_mailer_mail_recipient):
+        context, harvest_source, job = self._create_harvest_source_and_job_if_not_existing()
+
+        status = toolkit.get_action('harvest_source_show_status')(context, {'id': harvest_source['id']})
+
+        send_error_mail(
+            context,
+            harvest_source['id'],
+            status
+        )
+        assert_equal(0, status['last_job']['stats']['errored'])
+        assert mock_mailer_mail_recipient.not_called
+
+    @patch('ckan.lib.mailer.mail_recipient')
+    def test_error_mail_sent(self, mock_mailer_mail_recipient):
+        context, harvest_source, job = self._create_harvest_source_and_job_if_not_existing()
+
+        # create a HarvestGatherError
+        job_model = HarvestJob.get(job['id'])
+        msg = 'System error - No harvester could be found for source type %s' % job_model.source.type
+        err = HarvestGatherError(message=msg, job=job_model)
+        err.save()
+
+        status = toolkit.get_action('harvest_source_show_status')(context, {'id': harvest_source['id']})
+
+        send_error_mail(
+            context,
+            harvest_source['id'],
+            status
+        )
+
+        assert_equal(1, status['last_job']['stats']['errored'])
+        assert mock_mailer_mail_recipient.called
+
+    @patch('ckan.lib.mailer.mail_recipient')
+    def test_error_mail_sent_with_org(self, mock_mailer_mail_recipient):
+        context, harvest_source, job = self._create_harvest_source_with_owner_org_and_job_if_not_existing()
+
+        # create a HarvestGatherError
+        job_model = HarvestJob.get(job['id'])
+        msg = 'System error - No harvester could be found for source type %s' % job_model.source.type
+        err = HarvestGatherError(message=msg, job=job_model)
+        err.save()
+
+        status = toolkit.get_action('harvest_source_show_status')(context, {'id': harvest_source['id']})
+
+        send_error_mail(
+            context,
+            harvest_source['id'],
+            status
+        )
+
+        assert_equal(1, status['last_job']['stats']['errored'])
+        assert mock_mailer_mail_recipient.called
+        assert_equal(2, mock_mailer_mail_recipient.call_count)
+
+
+class TestHarvestDBLog(unittest.TestCase):
+    @classmethod
+    def setup_class(cls):
+        reset_db()
+        harvest_model.setup()
+        
+    def test_harvest_db_logger(self):
+        # Create source and check if harvest_log table is populated
+        data_dict = SOURCE_DICT.copy()
+        data_dict['source_type'] = 'test'
+        source = factories.HarvestSourceObj(**data_dict)
+        content = 'Harvest source created: %s' % source.id
+        log = harvest_model.Session.query(harvest_model.HarvestLog).\
+                filter(harvest_model.HarvestLog.content==content).first()
+                
+        self.assertIsNotNone(log)
+        self.assertEqual(log.level, 'INFO')
+        
+        context = {
+            'model': model,
+            'session': model.Session,
+            'ignore_auth': True,
+        }
+
+        data = toolkit.get_action('harvest_log_list')(context, {})
+        self.assertTrue(len(data) > 0)
+        self.assertIn('level', data[0])
+        self.assertIn('content', data[0])
+        self.assertIn('created', data[0])
+        self.assertTrue(data[0]['created'] > data[1]['created'])
+        
+        per_page = 1
+        data = toolkit.get_action('harvest_log_list')(context, {'level': 'info', 'per_page': per_page})
+        self.assertEqual(len(data), per_page)
+        self.assertEqual(data[0]['level'], 'INFO')

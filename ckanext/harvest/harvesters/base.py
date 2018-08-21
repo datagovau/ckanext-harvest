@@ -2,7 +2,9 @@ import logging
 import re
 import uuid
 
+from sqlalchemy import exists
 from sqlalchemy.sql import update, bindparam
+
 from pylons import config
 
 from ckan import plugins as p
@@ -14,7 +16,7 @@ from ckan.lib.navl.validators import ignore_missing, ignore
 from ckan.lib.munge import munge_title_to_name, substitute_ascii_equivalents
 
 from ckanext.harvest.model import (HarvestObject, HarvestGatherError,
-                                   HarvestObjectError)
+                                   HarvestObjectError, HarvestJob)
 
 from ckan.plugins.core import SingletonPlugin, implements
 from ckanext.harvest.interfaces import IHarvester
@@ -58,7 +60,7 @@ class HarvesterBase(SingletonPlugin):
 
     @classmethod
     def _gen_new_name(cls, title, existing_name=None,
-                      append_type='number-sequence'):
+                      append_type=None):
         '''
         Returns a 'name' for the dataset (URL friendly), based on the title.
 
@@ -77,11 +79,19 @@ class HarvesterBase(SingletonPlugin):
         :type append_type: string
         '''
 
+        # If append_type was given, use it. Otherwise, use the configured default.
+        # If nothing was given and no defaults were set, use 'number-sequence'.
+        if append_type:
+            append_type_param = append_type
+        else:
+            append_type_param = config.get('ckanext.harvest.default_dataset_name_append',
+                                           'number-sequence')
+
         ideal_name = munge_title_to_name(title)
         ideal_name = re.sub('-+', '-', ideal_name)  # collapse multiple dashes
         return cls._ensure_name_is_unique(ideal_name,
                                           existing_name=existing_name,
-                                          append_type=append_type)
+                                          append_type=append_type_param)
 
     @staticmethod
     def _ensure_name_is_unique(ideal_name, existing_name=None,
@@ -219,7 +229,7 @@ class HarvesterBase(SingletonPlugin):
     def _create_or_update_package(self, package_dict, harvest_object,
                                   package_dict_form='rest'):
         '''
-        Creates a new package or updates an exisiting one according to the
+        Creates a new package or updates an existing one according to the
         package dictionary provided.
 
         The package dictionary can be in one of two forms:
@@ -288,9 +298,7 @@ class HarvesterBase(SingletonPlugin):
 
             if self.config and self.config.get('clean_tags', False):
                 tags = package_dict.get('tags', [])
-                tags = [munge_tag(t) for t in tags if munge_tag(t) != '']
-                tags = list(set(tags))
-                package_dict['tags'] = tags
+                package_dict['tags'] = self._clean_tags(tags)
 
             # Check if package exists
             try:
@@ -379,3 +387,48 @@ class HarvesterBase(SingletonPlugin):
                                 'ignore_auth': True}
         return p.toolkit.get_action('package_show')(
             package_show_context, data_dict)
+
+    def _clean_tags(self, tags):
+        try:
+            def _update_tag(tag_dict, key, newvalue):
+                # update the dict and return it
+                tag_dict[key] = newvalue
+                return tag_dict
+                                
+            # assume it's in the package_show form                    
+            tags = [_update_tag(t, 'name', munge_tag(t['name'])) for t in tags if munge_tag(t['name']) != '']
+
+        except TypeError: # a TypeError is raised if `t` above is a string
+           # REST format: 'tags' is a list of strings
+           tags = [munge_tag(t) for t in tags if munge_tag(t) != '']                
+           tags = list(set(tags))
+           return tags
+           
+        return tags      
+
+    @classmethod
+    def last_error_free_job(cls, harvest_job):
+        # TODO weed out cancelled jobs somehow.
+        # look for jobs with no gather errors
+        jobs = \
+            model.Session.query(HarvestJob) \
+                 .filter(HarvestJob.source == harvest_job.source) \
+                 .filter(HarvestJob.gather_started != None) \
+                 .filter(HarvestJob.status == 'Finished') \
+                 .filter(HarvestJob.id != harvest_job.id) \
+                 .filter(
+                     ~exists().where(
+                         HarvestGatherError.harvest_job_id == HarvestJob.id)) \
+                 .order_by(HarvestJob.gather_started.desc())
+        # now check them until we find one with no fetch/import errors
+        # (looping rather than doing sql, in case there are lots of objects
+        # and lots of jobs)
+        for job in jobs:
+            for obj in job.objects:
+                if obj.current is False and \
+                        obj.report_status != 'not modified':
+                    # unsuccessful, so go onto the next job
+                    break
+            else:
+                return job
+
